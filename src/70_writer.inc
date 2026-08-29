@@ -116,36 +116,23 @@ static void bs_put_hex(bs_writer *w, bs_span s) {
 
 /* A Datalog string literal.
  *
- * UTF-8 passes through untouched: the specification's own samples contain
- * multi-byte characters printed verbatim, and re-encoding them would break
- * the round-trip the conformance suite checks. Only the characters that would
- * terminate or reinterpret the literal are escaped. */
+ * The content is emitted verbatim between quotes, with no escaping at all.
+ * That is not an oversight and not a shortcut: it is what the reference
+ * implementation does, and the specification's own samples encode the result.
+ * test021_parsing carries a literal tab byte inside a string and expects that
+ * byte back, so a printer that escaped it would fail the round trip that the
+ * conformance suite exists to check.
+ *
+ * The consequence is worth stating plainly: a string containing a double
+ * quote renders as source that cannot be parsed back. That hazard lives in
+ * the specification's text format rather than here, and matching it is the
+ * only way to agree with every other implementation. Anything else would be
+ * a private dialect.
+ *
+ * UTF-8 passes through byte for byte for the same reason. */
 static void bs_put_string(bs_writer *w, bs_span s) {
-  size_t i;
   bs_put_byte(w, (uint8_t)'"');
-  for (i = 0; i < s.n; i++) {
-    uint8_t c = s.p[i];
-    switch (c) {
-    case (uint8_t)'"':
-      BS_PUT_LIT(w, "\\\"");
-      break;
-    case (uint8_t)'\\':
-      BS_PUT_LIT(w, "\\\\");
-      break;
-    case (uint8_t)'\n':
-      BS_PUT_LIT(w, "\\n");
-      break;
-    case (uint8_t)'\t':
-      BS_PUT_LIT(w, "\\t");
-      break;
-    case (uint8_t)'\r':
-      BS_PUT_LIT(w, "\\r");
-      break;
-    default:
-      bs_put_byte(w, c);
-      break;
-    }
-  }
+  bs_put_span(w, s);
   bs_put_byte(w, (uint8_t)'"');
 }
 

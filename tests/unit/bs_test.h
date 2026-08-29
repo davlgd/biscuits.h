@@ -28,6 +28,20 @@ static void bs_test_report(int ok, const char *expr, const char *file,
 
 #define CHECK(expr) bs_test_report((expr) ? 1 : 0, #expr, __FILE__, __LINE__)
 
+/* For a precondition the rest of the test depends on.
+ *
+ * CHECK records a failure and carries on, which is right for independent
+ * assertions and wrong for a setup step: continuing past a failed parse means
+ * reading an object that was never initialised, which is undefined behaviour
+ * in the test itself. REQUIRE reports and returns. */
+#define REQUIRE(expr)                                                          \
+  do {                                                                         \
+    if (!(expr)) {                                                             \
+      bs_test_report(0, #expr, __FILE__, __LINE__);                            \
+      return;                                                                  \
+    }                                                                          \
+  } while (0)
+
 static int bs_test_finish(void) {
   (void)printf("1..%d\n", bs_test_n);
   return (bs_test_bad == 0) ? 0 : 1;

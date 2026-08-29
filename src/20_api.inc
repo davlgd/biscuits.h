@@ -249,3 +249,38 @@ BS_API BS_MUST_USE size_t bs_symbol_default_count(void);
  * discards the whole rendering, never a prefix of it. */
 BS_API BS_MUST_USE bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
                                            bs_span term);
+
+/* ---------------------------------------------------------------------------
+ * Token-wide tables
+ *
+ * Symbols and public keys are referenced by index, and the indices span the
+ * whole token: each block's arrays are appended in block order, authority
+ * first. So they cannot be read one block at a time -- the tables are built
+ * once from the parsed token, then every block is read against them.
+ *
+ * Like bs_token, these borrow: the spans point into the token's own bytes,
+ * and only the two index arrays come from the arena.
+ * ------------------------------------------------------------------------ */
+
+typedef struct bs_tables {
+  bs_symbols symbols;
+  bs_public_key *public_keys;
+  size_t public_key_count;
+} bs_tables;
+
+BS_API BS_MUST_USE bs_status bs_tables_build(bs_arena *a, const bs_token *t,
+                                             bs_tables *out);
+
+/* Render one encoded Predicate as `name(term, ...)`. */
+BS_API BS_MUST_USE bs_status bs_predicate_print(bs_writer *w,
+                                                const bs_tables *tab,
+                                                bs_span pred);
+
+/* Render one encoded Fact. Identical output to its predicate; the wrapper
+ * exists because the wire format has one. */
+BS_API BS_MUST_USE bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
+                                           bs_span fact);
+
+/* Render one encoded Scope: `authority`, `previous`, or `<alg>/<hex key>`. */
+BS_API BS_MUST_USE bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
+                                            bs_span scope);

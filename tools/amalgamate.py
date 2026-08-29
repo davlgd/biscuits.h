@@ -32,6 +32,7 @@ PARTS = [
     "70_writer.inc",
     "75_symbols.inc",
     "80_term.inc",
+    "85_block.inc",
     "99_epilogue.inc",
 ]
 

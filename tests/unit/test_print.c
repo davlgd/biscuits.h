@@ -129,13 +129,19 @@ static void test_writer_strings_and_hex(void) {
   bs_put_string(&W, bs_span_make("hi", 2U));
   CHECK(rendered("\"hi\""));
 
+  /* Verbatim, with no escaping: the reference implementation does the same,
+   * and test021_parsing of the official suite carries a literal tab inside a
+   * string and expects that byte back. Escaping would fail the round trip. */
   reset();
-  bs_put_string(&W, bs_span_make("a\"b\\c", 5U));
-  CHECK(rendered("\"a\\\"b\\\\c\""));
+  bs_put_string(&W, bs_span_make("a\tb", 3U));
+  CHECK(rendered("\"a\tb\""));
 
+  /* And the hazard that comes with it, recorded rather than hidden: a string
+   * containing a quote renders as source that cannot be parsed back. That is
+   * a property of the specification's text format, not of this printer. */
   reset();
-  bs_put_string(&W, bs_span_make("a\nb\tc\rd", 7U));
-  CHECK(rendered("\"a\\nb\\tc\\rd\""));
+  bs_put_string(&W, bs_span_make("a\"b", 3U));
+  CHECK(rendered("\"a\"b\""));
 
   /* UTF-8 passes through byte for byte: the samples print multi-byte
    * characters verbatim and re-encoding them would break the round trip. */
