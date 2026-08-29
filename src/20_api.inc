@@ -554,6 +554,45 @@ typedef struct bs_world {
   size_t block_count;
 } bs_world;
 
+/* ---------------------------------------------------------------------------
+ * Interning table
+ *
+ * Reading a token needs one symbol table; evaluating one needs a different
+ * table. A third-party block numbers its symbols from its own array, because
+ * whoever signed it never saw the rest of the token -- fine for printing,
+ * wrong for evaluation, where two facts spelled the same way must be the same
+ * fact whichever block stated them.
+ *
+ * So the engine interns: seeded with the token-wide symbols, so ordinary
+ * blocks keep their indices unchanged, then extended with whatever the
+ * third-party blocks and the authorizer introduce. Entries are borrowed
+ * spans, never copies. */
+typedef struct bs_symtab {
+  bs_span *entries;
+  size_t count;
+  size_t cap;
+} bs_symtab;
+
+/* Reserve room for the seed plus `extra` new symbols. */
+BS_API BS_MUST_USE bs_status bs_symtab_init(bs_symtab *t, bs_arena *a,
+                                            const bs_symbols *seed,
+                                            size_t extra);
+
+/* Resolve an index to its text. Returns 0 for an index this table cannot
+ * name. */
+BS_API BS_MUST_USE int bs_symtab_get(const bs_symtab *t, uint64_t index,
+                                     bs_span *out);
+
+/* Find `text`, appending it if absent, and report its index. */
+BS_API BS_MUST_USE bs_status bs_symtab_intern(bs_symtab *t, bs_span text,
+                                              uint64_t *out);
+
+/* Translate an index from a block's own numbering into this table's. Safe to
+ * call for an ordinary block too, where it returns the index unchanged. */
+BS_API BS_MUST_USE bs_status bs_symtab_translate(bs_symtab *t,
+                                                 const bs_symbols *from,
+                                                 uint64_t index, uint64_t *out);
+
 /* Reserve every pool in one go.
  *
  * The capacities are the caller's to choose because only the caller knows

@@ -392,6 +392,124 @@ static void test_origin_bitset(void) {
   CHECK((BS_ORIGIN_AUTHORIZER & BS_ORIGIN_ONE(0U)) == 0U);
 }
 
+/* --------------------------------------------------------------------------
+ * Interning
+ * ----------------------------------------------------------------------- */
+
+/* One scratch buffer for the interning tests: they run in sequence and each
+ * re-initialises the arena, so three separate ones bought nothing. */
+static uint8_t symtab_buf[8192];
+
+static void test_symtab_preserves_token_indices(void) {
+  bs_arena a;
+  bs_symtab t;
+  bs_span got;
+  uint64_t idx = 0;
+
+  /* Seeded from the token's own table, so an index that arrived on the wire
+   * still names the same text afterwards. Renumbering here would silently
+   * rename every predicate in the token. */
+  REQUIRE(bs_arena_init(&a, symtab_buf, sizeof symtab_buf) == BS_OK);
+  REQUIRE(bs_symtab_init(&t, &a, &TAB.symbols, 8U) == BS_OK);
+  CHECK(t.count == 2U);
+  CHECK(bs_symtab_get(&t, 1024U, &got) &&
+        bs_span_eq(got, bs_span_make("file1", 5U)));
+  CHECK(bs_symtab_get(&t, 1025U, &got) &&
+        bs_span_eq(got, bs_span_make("owner", 5U)));
+
+  /* A symbol already present keeps its index. */
+  CHECK(bs_symtab_intern(&t, bs_span_make("file1", 5U), &idx) == BS_OK);
+  CHECK(idx == 1024U);
+  CHECK(t.count == 2U);
+
+  /* A well-known symbol resolves to its shared index, never to a fresh one --
+   * otherwise a token that spells out "read" would state a different fact
+   * from one that used the well-known index. */
+  CHECK(bs_symtab_intern(&t, bs_span_make("read", 4U), &idx) == BS_OK);
+  CHECK(idx == 0U);
+  CHECK(t.count == 2U);
+
+  /* A token symbol that happens to duplicate a well-known one resolves to the
+   * shared index, not to the token's copy. TAB carries "owner" at 1025 and
+   * "owner" is also well-known symbol 7; interning it gives 7. That is the
+   * point of interning -- two blocks writing owner("alice") state one fact,
+   * whichever spelling each used. */
+  CHECK(bs_symtab_intern(&t, bs_span_make("owner", 5U), &idx) == BS_OK);
+  CHECK(idx == 7U);
+
+  /* A genuinely new symbol is appended past everything the token carried. */
+  CHECK(bs_symtab_intern(&t, bs_span_make("gamma", 5U), &idx) == BS_OK);
+  CHECK(idx == 1026U);
+  CHECK(t.count == 3U);
+  CHECK(bs_symtab_intern(&t, bs_span_make("gamma", 5U), &idx) == BS_OK);
+  CHECK(idx == 1026U && t.count == 3U);
+}
+
+static void test_symtab_translates_block_local_indices(void) {
+  bs_span third_party[2];
+  bs_symbols theirs;
+  bs_arena a;
+  bs_symtab t;
+  uint64_t idx = 0;
+
+  /* A third-party block numbers from its own array: its index 1024 is its
+   * first symbol, which has nothing to do with the token's 1024. */
+  third_party[0] = bs_span_make("gamma", 5U);
+  third_party[1] = bs_span_make("file1", 5U);
+  theirs.entries = third_party;
+  theirs.count = 2U;
+
+  REQUIRE(bs_arena_init(&a, symtab_buf, sizeof symtab_buf) == BS_OK);
+  REQUIRE(bs_symtab_init(&t, &a, &TAB.symbols, 8U) == BS_OK);
+
+  /* Their 1024 is "gamma", which the token did not carry: a new index. */
+  CHECK(bs_symtab_translate(&t, &theirs, 1024U, &idx) == BS_OK);
+  CHECK(idx == 1026U);
+
+  /* Their 1025 is "file1", which the token did carry at 1024. Translation
+   * must land on that one, or the same fact stated by two blocks would count
+   * as two different facts. */
+  CHECK(bs_symtab_translate(&t, &theirs, 1025U, &idx) == BS_OK);
+  CHECK(idx == 1024U);
+
+  /* Translating through the token's own table leaves an ordinary symbol
+   * alone. */
+  CHECK(bs_symtab_translate(&t, &TAB.symbols, 1024U, &idx) == BS_OK);
+  CHECK(idx == 1024U);
+  CHECK(bs_symtab_translate(&t, &TAB.symbols, 3U, &idx) == BS_OK);
+  CHECK(idx == 3U);
+
+  /* It does *not* leave alone a token symbol that duplicates a well-known
+   * one: TAB's 1025 is "owner", and interning that lands on well-known 7.
+   * Translation is therefore not the identity in general, which is why it is
+   * applied to every index rather than only to third-party ones. */
+  CHECK(bs_symtab_translate(&t, &TAB.symbols, 1025U, &idx) == BS_OK);
+  CHECK(idx == 7U);
+
+  /* An index the source cannot name is refused, not passed through. */
+  CHECK(bs_symtab_translate(&t, &theirs, 1026U, &idx) == BS_ERR_MALFORMED);
+  CHECK(bs_symtab_translate(&t, &theirs, 900U, &idx) == BS_ERR_MALFORMED);
+}
+
+static void test_symtab_exhaustion(void) {
+  bs_arena a;
+  bs_symtab t;
+  uint64_t idx = 0;
+
+  /* Room for the seed and one more. The second new symbol has nowhere to go,
+   * and says so rather than overwriting. */
+  REQUIRE(bs_arena_init(&a, symtab_buf, sizeof symtab_buf) == BS_OK);
+  REQUIRE(bs_symtab_init(&t, &a, &TAB.symbols, 1U) == BS_OK);
+  CHECK(bs_symtab_intern(&t, bs_span_make("one", 3U), &idx) == BS_OK);
+  CHECK(bs_symtab_intern(&t, bs_span_make("two", 3U), &idx) == BS_ERR_NOMEM);
+  /* Interning something already present still works when full. */
+  CHECK(bs_symtab_intern(&t, bs_span_make("one", 3U), &idx) == BS_OK);
+
+  CHECK(bs_symtab_init(NULL, &a, &TAB.symbols, 1U) == BS_ERR_ARGUMENT);
+  CHECK(bs_symtab_init(&t, NULL, &TAB.symbols, 1U) == BS_ERR_ARGUMENT);
+  CHECK(!bs_symtab_get(NULL, 0U, NULL));
+}
+
 int main(void) {
   tables_for_tests();
   test_symbol_indices_span_the_whole_token();
@@ -401,5 +519,8 @@ int main(void) {
   test_scope_printing();
   test_world_reserves_everything_up_front();
   test_origin_bitset();
+  test_symtab_preserves_token_indices();
+  test_symtab_translates_block_local_indices();
+  test_symtab_exhaustion();
   return bs_test_finish();
 }
