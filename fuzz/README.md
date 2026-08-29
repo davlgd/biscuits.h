@@ -48,6 +48,18 @@ a mutation that lands a valid tag byte is worth far more than one that lands a
 random byte. `biscuits.dict` carries every field tag in the schema, both key
 algorithm encodings, and the two lengths that matter — 32 and 64.
 
+## Throughput is not uniform
+
+The three targets are not comparable. In four minutes each, on one laptop
+core: `fuzz_parse` reached 72 million executions, `fuzz_print` 22 million, and
+`fuzz_verify` 87 thousand. Verification does curve arithmetic on every input,
+so it is about a thousand times slower per case.
+
+That is worth knowing before reading any of those numbers as reassurance. The
+chain target needs runs measured in hours to cover what the decoder covers in
+seconds, and a smoke run of equal wall-clock time gives the three targets
+wildly unequal scrutiny.
+
 ## What this is not
 
 A twenty-second run per target on every commit is a regression gate, not a

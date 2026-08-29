@@ -50,6 +50,13 @@ model-check exhaustively.
 no floating point, no threads, and exactly three libc functions. A reviewer
 can read the whole of it.
 
+A note on the fuzzing figures above, because the spread matters. The signature
+chain target managed 87 thousand executions where the decoder managed 72
+million: verification does curve arithmetic on every input, so it is roughly
+a thousand times slower per case. That target therefore needs runs measured in
+hours, not minutes, before its number means anything — which is one more
+reason the continuous-fuzzing row still says not started.
+
 ## Evidence
 
 Claims without a number in this table are not yet claims.
@@ -66,6 +73,7 @@ Claims without a number in this table are not yet claims.
 | Static analysis clean | clang-tidy (all checks as errors), cppcheck, scan-build | passing |
 | CodeQL | weekly and on change | configured, but dormant: code scanning needs Advanced Security while this repository is private |
 | Fuzzing as a regression gate | `make fuzz-smoke` — three libFuzzer targets, seeded with the specification samples, on every commit | passing |
+| Longest fuzzing run so far | 4 minutes per target under ASan+UBSan with `BS_ASSERT` compiled in: **72M** executions on the decoder, **22M** on the printers, **87k** on the signature chain — no crashes, no violated invariants | recorded, not sufficient |
 | Continuous fuzzing | OSS-Fuzz | not started — needs a public repository, and a short run per commit is not a substitute |
 | Differential fuzzing vs `biscuit-rust` | Same input, both implementations, verdicts compared | not started |
 | Wire decoder bounded model checking | CBMC over the protobuf and base64 decoders | not started |
