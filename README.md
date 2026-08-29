@@ -126,6 +126,8 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Ed25519 verification | done — **47/47** on the signatures tier |
 | Base64url | done — strict, with its own fuzz target |
 | Datalog world and pools | done — flat index-addressed pools, reserved once |
+| Symbol interning across blocks | done — third-party blocks unified into one space |
+| Wire to memory loader (facts) | done — recursion-free nested terms |
 | Datalog engine | in progress |
 | Expression VM | not started |
 | Datalog text parser | not started |
@@ -144,8 +146,8 @@ tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         4965 lines
-object -Os    39672 bytes
+header         5386 lines
+object -Os    42088 bytes
 ```
 <!-- metrics:end -->
 

@@ -41,6 +41,7 @@ PARTS = [
     "95_datalog.inc",
     "100_world.inc",
     "105_symtab.inc",
+    "110_load.inc",
     "99_epilogue.inc",
 ]
 

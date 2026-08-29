@@ -625,3 +625,15 @@ BS_API BS_MUST_USE bs_status bs_world_init(bs_world *w, bs_arena *a,
                                            const bs_tables *tab,
                                            size_t block_count,
                                            const bs_limits *lim);
+
+/* Load every fact a block states into the world, tagged with that block as
+ * its origin.
+ *
+ * `from` is the symbol table the block's indices are numbered against: its
+ * own for a third-party block, the token-wide one otherwise. Supplying the
+ * wrong one does not fail, it renames every predicate in the block, so the
+ * caller that knows the difference is the one that passes it. */
+BS_API BS_MUST_USE bs_status bs_world_load_facts(bs_world *w, bs_symtab *syms,
+                                                 const bs_symbols *from,
+                                                 bs_span block,
+                                                 size_t block_index);

@@ -510,6 +510,196 @@ static void test_symtab_exhaustion(void) {
   CHECK(!bs_symtab_get(NULL, 0U, NULL));
 }
 
+/* --------------------------------------------------------------------------
+ * Loading facts
+ * ----------------------------------------------------------------------- */
+
+static uint8_t load_buf[64 * 1024];
+
+/* A Block message carrying one fact `name(term...)`. */
+static void put_fact_block(buf *w, uint64_t name, const buf *terms) {
+  buf pred;
+  buf fact;
+  size_t i;
+  pred.n = 0;
+  put_tag(&pred, BS_F_PREDICATE_NAME, BS_PB_VARINT);
+  put_varint(&pred, name);
+  for (i = 0; i < terms->n; i++) {
+    put(&pred, terms->b[i]);
+  }
+  fact.n = 0;
+  put_bytes(&fact, BS_F_FACT_PREDICATE, pred.b, pred.n);
+  w->n = 0;
+  put_bytes(w, BS_F_BLOCK_FACTS, fact.b, fact.n);
+}
+
+/* An encoded container nested `depth` levels deep, as a Term. */
+static void put_nested_array(buf *out, unsigned int depth) {
+  buf inner;
+  buf outer;
+  unsigned int d;
+  inner.n = 0;
+  put_bytes(&inner, BS_F_TERM_ARRAY, NULL, 0U);
+  for (d = 1; d < depth; d++) {
+    buf list;
+    list.n = 0;
+    put_bytes(&list, 1U, inner.b, inner.n);
+    outer.n = 0;
+    put_bytes(&outer, BS_F_TERM_ARRAY, list.b, list.n);
+    inner = outer;
+  }
+  *out = inner;
+}
+
+/* Modest pools: these tests exercise the loader, not the default sizing, and
+ * the defaults reserve enough opcode slots to want a third of a megabyte. */
+static bs_limits modest_limits(void) {
+  bs_limits l = bs_limits_default();
+  l.max_terms = 256U;
+  l.max_ops = 256U;
+  l.max_exprs = 32U;
+  l.max_preds = 64U;
+  l.max_syms = 32U;
+  l.max_facts = 64U;
+  l.max_rules = 16U;
+  l.max_checks = 16U;
+  l.max_policies = 8U;
+  return l;
+}
+
+static bs_status load_one(const buf *block, bs_world *w, bs_symtab *syms) {
+  static bs_arena a;
+  bs_limits lim = modest_limits();
+  bs_status st;
+  st = bs_arena_init(&a, load_buf, sizeof load_buf);
+  if (st != BS_OK) {
+    return st;
+  }
+  st = bs_symtab_init(syms, &a, &TAB.symbols, 64U);
+  if (st != BS_OK) {
+    return st;
+  }
+  st = bs_world_init(w, &a, &TAB, 1U, &lim);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_world_load_facts(w, syms, &TAB.symbols, span_of(block), 0U);
+}
+
+static void test_load_facts_and_origins(void) {
+  bs_world w;
+  bs_symtab syms;
+  buf terms;
+  buf block;
+
+  /* right("file1") -- name 4 is well-known, 1024 is the token's "file1". */
+  terms.n = 0;
+  put_term_string(&terms, BS_F_PREDICATE_TERMS, 1024U);
+  put_fact_block(&block, 4U, &terms);
+
+  REQUIRE(load_one(&block, &w, &syms) == BS_OK);
+  REQUIRE(w.fact_count == 1U);
+  CHECK(w.facts[0].pred.name == 4U);
+  CHECK(w.facts[0].pred.count == 1U);
+  CHECK(w.terms[w.facts[0].pred.at].kind == BS_T_STRING);
+  CHECK(w.terms[w.facts[0].pred.at].as.sym == 1024U);
+  /* A fact stated in block 0 has origin {0}, which is what `trusting`
+   * filters on and what a rule will union into whatever it derives. */
+  CHECK(w.facts[0].origin == BS_ORIGIN_ONE(0U));
+}
+
+static void test_load_rejects_deep_nesting(void) {
+  bs_world w;
+  bs_symtab syms;
+  buf terms;
+  buf block;
+  buf nested;
+
+  /* At the limit: accepted. */
+  put_nested_array(&nested, (unsigned int)BS_MAX_DEPTH);
+  terms.n = 0;
+  put_bytes(&terms, BS_F_PREDICATE_TERMS, nested.b, nested.n);
+  put_fact_block(&block, 4U, &terms);
+  CHECK(load_one(&block, &w, &syms) == BS_OK);
+
+  /* One level further: a clean BS_ERR_DEPTH. The whole point of expanding
+   * breadth-first in the pool rather than recursing is that this is an
+   * ordinary error return and not a smashed stack. */
+  put_nested_array(&nested, (unsigned int)BS_MAX_DEPTH + 1U);
+  terms.n = 0;
+  put_bytes(&terms, BS_F_PREDICATE_TERMS, nested.b, nested.n);
+  put_fact_block(&block, 4U, &terms);
+  CHECK(load_one(&block, &w, &syms) == BS_ERR_DEPTH);
+}
+
+static void test_load_rejects_malformed_facts(void) {
+  bs_world w;
+  bs_symtab syms;
+  buf block;
+  buf fact;
+  buf pred;
+
+  /* A fact with no predicate. */
+  fact.n = 0;
+  block.n = 0;
+  put_bytes(&block, BS_F_BLOCK_FACTS, fact.b, fact.n);
+  CHECK(load_one(&block, &w, &syms) == BS_ERR_MALFORMED);
+
+  /* A predicate with no name. */
+  pred.n = 0;
+  put_term_string(&pred, BS_F_PREDICATE_TERMS, 1024U);
+  fact.n = 0;
+  put_bytes(&fact, BS_F_FACT_PREDICATE, pred.b, pred.n);
+  block.n = 0;
+  put_bytes(&block, BS_F_BLOCK_FACTS, fact.b, fact.n);
+  CHECK(load_one(&block, &w, &syms) == BS_ERR_MALFORMED);
+
+  /* A name the symbol table cannot resolve. */
+  pred.n = 0;
+  put_tag(&pred, BS_F_PREDICATE_NAME, BS_PB_VARINT);
+  put_varint(&pred, 9999U);
+  fact.n = 0;
+  put_bytes(&fact, BS_F_FACT_PREDICATE, pred.b, pred.n);
+  block.n = 0;
+  put_bytes(&block, BS_F_BLOCK_FACTS, fact.b, fact.n);
+  CHECK(load_one(&block, &w, &syms) == BS_ERR_MALFORMED);
+}
+
+static void test_load_reports_pool_exhaustion(void) {
+  static bs_arena a;
+  bs_world w;
+  bs_symtab syms;
+  bs_limits lim = modest_limits();
+  buf terms;
+  buf block;
+
+  terms.n = 0;
+  put_term_string(&terms, BS_F_PREDICATE_TERMS, 1024U);
+  put_fact_block(&block, 4U, &terms);
+
+  /* No room for a single fact: reported, not overwritten. */
+  lim.max_facts = 0U;
+  REQUIRE(bs_arena_init(&a, load_buf, sizeof load_buf) == BS_OK);
+  REQUIRE(bs_symtab_init(&syms, &a, &TAB.symbols, 8U) == BS_OK);
+  REQUIRE(bs_world_init(&w, &a, &TAB, 1U, &lim) == BS_OK);
+  CHECK(bs_world_load_facts(&w, &syms, &TAB.symbols, span_of(&block), 0U) ==
+        BS_ERR_NOMEM);
+
+  /* Room for the fact but not for its terms. */
+  lim = modest_limits();
+  lim.max_terms = 0U;
+  REQUIRE(bs_arena_init(&a, load_buf, sizeof load_buf) == BS_OK);
+  REQUIRE(bs_symtab_init(&syms, &a, &TAB.symbols, 8U) == BS_OK);
+  REQUIRE(bs_world_init(&w, &a, &TAB, 1U, &lim) == BS_OK);
+  CHECK(bs_world_load_facts(&w, &syms, &TAB.symbols, span_of(&block), 0U) ==
+        BS_ERR_NOMEM);
+
+  CHECK(bs_world_load_facts(NULL, &syms, &TAB.symbols, span_of(&block), 0U) ==
+        BS_ERR_ARGUMENT);
+  CHECK(bs_world_load_facts(&w, &syms, &TAB.symbols, span_of(&block),
+                            (size_t)BS_MAX_BLOCKS) == BS_ERR_LIMIT);
+}
+
 int main(void) {
   tables_for_tests();
   test_symbol_indices_span_the_whole_token();
@@ -522,5 +712,9 @@ int main(void) {
   test_symtab_preserves_token_indices();
   test_symtab_translates_block_local_indices();
   test_symtab_exhaustion();
+  test_load_facts_and_origins();
+  test_load_rejects_deep_nesting();
+  test_load_rejects_malformed_facts();
+  test_load_reports_pool_exhaustion();
   return bs_test_finish();
 }
