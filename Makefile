@@ -19,6 +19,16 @@ else
   LLVM_BIN :=
 endif
 
+# clang-format output differs between major versions, so the version is pinned
+# rather than "whatever the machine has": otherwise the formatting gate passes
+# locally and fails in CI, which teaches everyone to ignore it.
+CLANG_FORMAT_VERSION := 23.1.0
+ifeq ($(shell command -v uvx >/dev/null 2>&1 && echo yes),yes)
+  CLANG_FORMAT ?= uvx clang-format@$(CLANG_FORMAT_VERSION)
+else
+  CLANG_FORMAT ?= clang-format
+endif
+
 CC        ?= cc
 CLANG     := $(LLVM_BIN)clang
 CLANG_TIDY:= $(LLVM_BIN)clang-tidy
@@ -213,11 +223,11 @@ lint: check-amalgamation format-check tidy cppcheck invariants check-metrics
 
 .PHONY: format
 format:
-	@$(LLVM_BIN)clang-format -i src/*.inc $(ALL_C)
+	@$(CLANG_FORMAT) -i src/*.inc $(ALL_C)
 
 .PHONY: format-check
 format-check:
-	@$(LLVM_BIN)clang-format --dry-run --Werror src/*.inc $(ALL_C)
+	@$(CLANG_FORMAT) --dry-run --Werror src/*.inc $(ALL_C)
 
 # ---------------------------------------------------------------------------
 # Measurements

@@ -92,8 +92,14 @@ jobs:
       - name: Install analysers
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy clang-format cppcheck
+          sudo apt-get install -y clang-tidy cppcheck
+          # Pinned: clang-format's output changes between major versions, and
+          # the distribution package tracks a different one from the developer
+          # machines. See CLANG_FORMAT_VERSION in the Makefile.
+          pip install --quiet clang-format==23.1.0
       - run: make format-check
+        env:
+          CLANG_FORMAT: clang-format
       - run: make tidy
       - run: make cppcheck
       - run: make check-metrics

@@ -40,11 +40,15 @@ import tempfile
 # is a design decision, not a build fix: each entry is a dependency every
 # embedding target must provide.
 #
-# bzero is here because the source never calls it: clang lowers
-# memset(p, 0, n) to bzero on Darwin targets. An embedding target must
-# therefore provide memset or bzero depending on how it is compiled, and
-# saying "memset" alone would be a claim the shipped object does not honour.
-ALLOWED_LIBC = {"memcpy", "memcmp", "memset", "bzero"}
+# bzero and bcmp are here although the source calls neither. Compilers lower
+# memset(p, 0, n) to bzero and memcmp(a, b, n) == 0 to bcmp, and which of them
+# appears depends on the target: bzero showed up on Darwin, bcmp on Linux with
+# glibc. An embedding target must provide whichever its toolchain emits, so
+# claiming "memcpy, memcmp, memset" alone would be a claim the shipped object
+# does not honour on either platform.
+#
+# This is the whole reason the check reads symbols instead of grepping source.
+ALLOWED_LIBC = {"memcpy", "memcmp", "memset", "bzero", "bcmp"}
 
 # Symbols the toolchain injects rather than the source calling them. Kept
 # narrow on purpose; anything not listed here is reported.

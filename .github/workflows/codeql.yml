@@ -17,6 +17,12 @@ permissions:
 
 jobs:
   analyze:
+    # Uploading results to code scanning needs GitHub Advanced Security on a
+    # private repository. Until this one is public the upload fails with
+    # "Resource not accessible by integration" -- a licensing outcome that
+    # says nothing about the code, and a red job that means nothing is worse
+    # than no job at all. This turns itself on the day the repo goes public.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

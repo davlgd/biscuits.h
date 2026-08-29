@@ -63,7 +63,8 @@ Claims without a number in this table are not yet claims.
 | ASan + UBSan clean | `make asan`, at `-O0` and `-O1`, `-fno-sanitize-recover=all` | passing |
 | MSan clean | `make msan`, Linux CI job | pending — unsupported on macOS/arm64, so the only evidence is a green Linux run, and there has not been one yet |
 | Portable arithmetic path exercised | `make portable` — full suite with `BS_NO_OVERFLOW_BUILTINS` | passing |
-| Static analysis clean | clang-tidy (all checks as errors), cppcheck, scan-build, CodeQL | passing |
+| Static analysis clean | clang-tidy (all checks as errors), cppcheck, scan-build | passing |
+| CodeQL | weekly and on change | configured, but dormant: code scanning needs Advanced Security while this repository is private |
 | Continuous fuzzing | libFuzzer targets, OSS-Fuzz | not started |
 | Differential fuzzing vs `biscuit-rust` | Same input, both implementations, verdicts compared | not started |
 | Wire decoder bounded model checking | CBMC over the protobuf and base64 decoders | not started |
