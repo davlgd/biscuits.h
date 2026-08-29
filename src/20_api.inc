@@ -406,6 +406,11 @@ BS_API BS_MUST_USE bs_status bs_token_verify(const bs_token *t,
 #define BS_T_ARRAY 8U
 #define BS_T_MAP 9U
 
+/* Internal only: a closure sitting on the evaluation stack, waiting for the
+ * operator that will decide whether to run it. Never encoded, never decoded,
+ * and numbered past every kind the wire format can express. */
+#define BS_T_CLOSURE 10U
+
 typedef struct bs_term {
   uint8_t kind;
   union {

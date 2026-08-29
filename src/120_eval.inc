@@ -462,74 +462,263 @@ static bs_status bs_get(const bs_eval *e, bs_term container, bs_term key,
   return BS_ERR_TYPE;
 }
 
-/* Evaluate one expression to a boolean.
+/* ---------------------------------------------------------------------------
+ * The machine
  *
- * The opcode stream is postfix, so this is a plain left-to-right pass over a
- * value stack -- no tree, no recursion, no lookahead. Exactly one value must
- * remain at the end and it must be a boolean, which the specification
- * requires and which is checked here rather than assumed.
+ * Postfix opcodes over a value stack. What makes this more than a loop is
+ * closures: `a && b` encodes b as a zero-parameter closure so it can be
+ * skipped, and `.all()` runs its closure once per element. Evaluating a
+ * closure body from inside the evaluator would be recursion, which invariant
+ * 2 forbids -- and forbids for a reason, since the nesting is chosen by
+ * whoever sent the token.
  *
- * Every failure mode is a distinct status because the conformance suite
- * distinguishes them: an overflow and a type error are different outcomes,
- * and reporting both as "malformed" would pass fewer cases while looking
- * tidier. */
+ * So the evaluator carries an explicit frame stack. A frame is one opcode run
+ * being executed, plus at most one *pending* operator: the one that asked for
+ * a closure body to be run and is waiting for its result. When a body frame
+ * finishes, its value is on the stack and the parent's pending operator picks
+ * it up -- exactly what a return value and a resumed call would do, laid out
+ * where it can be bounded.
+ * ------------------------------------------------------------------------ */
+
+#define BS_PEND_NONE 0U
+#define BS_PEND_LAZY 1U
+#define BS_PEND_ALL 2U
+#define BS_PEND_ANY 3U
+#define BS_PEND_TRY 4U
+
+#ifndef BS_MAX_EVAL_FRAMES
+#define BS_MAX_EVAL_FRAMES 16
+#endif
+
+#ifndef BS_MAX_BINDINGS
+#define BS_MAX_BINDINGS 32
+#endif
+
+typedef struct bs_frame {
+  bs_expr expr;
+  uint32_t pc;
+  size_t bind_base; /* bindings above this belong to this frame */
+  size_t sp_base;   /* value stack height when the pending child was entered */
+  uint8_t pending;  /* the operator waiting on this frame's child */
+  bs_term subject;  /* the container being walked, for all and any */
+  bs_term fallback; /* what try_or returns when its closure fails */
+  uint32_t index;   /* position in `subject` */
+  uint32_t closure; /* the closure op being applied */
+} bs_frame;
+
+typedef struct bs_machine {
+  bs_frame frames[BS_MAX_EVAL_FRAMES];
+  bs_binding binds[BS_MAX_BINDINGS];
+  size_t depth;
+  size_t bind_count;
+} bs_machine;
+
+/* Push a frame for a closure's body, binding its parameter when it takes one.
+ */
+static bs_status bs_enter_closure(bs_eval *e, bs_machine *m,
+                                  uint32_t closure_op, const bs_term *arg) {
+  const bs_op *op;
+  size_t base = m->bind_count;
+
+  if (m->depth >= (size_t)BS_MAX_EVAL_FRAMES) {
+    return BS_ERR_DEPTH;
+  }
+  if ((size_t)closure_op >= e->w->op_count) {
+    return BS_ERR_MALFORMED;
+  }
+  op = &e->w->ops[closure_op];
+  if (op->tag != (uint8_t)BS_OP_CLOSURE) {
+    return BS_ERR_MALFORMED;
+  }
+
+  if (arg != NULL) {
+    uint64_t sym;
+    size_t i;
+    if (op->as.closure.count != 1U) {
+      return BS_ERR_MALFORMED; /* all and any pass exactly one element */
+    }
+    if ((size_t)op->as.closure.at >= e->w->sym_count) {
+      return BS_ERR_MALFORMED;
+    }
+    if (m->bind_count >= (size_t)BS_MAX_BINDINGS) {
+      return BS_ERR_LIMIT;
+    }
+    sym = e->w->syms[op->as.closure.at];
+    /* "Shadowing (defining a parameter with the same name as a variable
+     * already in scope) is not allowed and should be rejected before starting
+     * the evaluation." */
+    for (i = 0; i < m->bind_count; i++) {
+      if (m->binds[i].sym == sym) {
+        return BS_ERR_SHADOWED;
+      }
+    }
+    m->binds[m->bind_count].sym = sym;
+    m->binds[m->bind_count].value = *arg;
+    m->bind_count++;
+  } else if (op->as.closure.count != 0U) {
+    /* A short-circuiting operator's right-hand side takes no parameters. */
+    return BS_ERR_MALFORMED;
+  }
+
+  m->frames[m->depth].expr = op->as.closure.body;
+  m->frames[m->depth].pc = 0;
+  m->frames[m->depth].bind_base = base;
+  m->frames[m->depth].pending = (uint8_t)BS_PEND_NONE;
+  m->frames[m->depth].index = 0;
+  m->frames[m->depth].closure = 0;
+  m->depth++;
+  e->bindings = m->binds;
+  e->binding_count = m->bind_count;
+  return BS_OK;
+}
+
+/* Evaluate one expression to a boolean. */
 static bs_status bs_expr_eval(bs_eval *e, bs_expr expr, int *out) {
-  uint32_t i;
-  bs_term result;
+  bs_machine m;
+  size_t i;
+  bs_status st;
 
+  if (e->binding_count > (size_t)BS_MAX_BINDINGS) {
+    st = BS_ERR_LIMIT;
+    goto failed;
+  }
+  /* The caller's bindings sit at the bottom, visible to every frame. */
+  for (i = 0; i < e->binding_count; i++) {
+    m.binds[i] = e->bindings[i];
+  }
+  m.bind_count = e->binding_count;
+  m.depth = 1;
   e->sp = 0;
+  e->bindings = m.binds;
+  e->binding_count = m.bind_count;
 
-  for (i = 0; i < expr.count; i++) {
+  m.frames[0].expr = expr;
+  m.frames[0].pc = 0;
+  m.frames[0].bind_base = m.bind_count;
+  m.frames[0].pending = (uint8_t)BS_PEND_NONE;
+  m.frames[0].sp_base = 0;
+  m.frames[0].index = 0;
+  m.frames[0].closure = 0;
+
+again:
+  while (m.depth > 0U) {
+    bs_frame *f = &m.frames[m.depth - 1U];
     const bs_op *op;
     bs_term a;
     bs_term b;
-    bs_status st;
-    int cmp = 0;
+    bs_term result;
     int flag = 0;
+    int cmp = 0;
     int64_t n = 0;
 
-    if ((size_t)expr.at + (size_t)i >= e->w->op_count) {
-      return BS_ERR_MALFORMED;
+    /* A closure body has finished; its value is on the stack, and the
+     * operator that asked for it decides what that means. */
+    if (f->pending != (uint8_t)BS_PEND_NONE) {
+      uint8_t pend = f->pending;
+      st = bs_pop(e, &a);
+      if (st != BS_OK) {
+        goto failed;
+      }
+      m.bind_count = f->bind_base;
+      e->binding_count = m.bind_count;
+
+      if (pend == (uint8_t)BS_PEND_LAZY || pend == (uint8_t)BS_PEND_TRY) {
+        if (pend == (uint8_t)BS_PEND_LAZY && a.kind != (uint8_t)BS_T_BOOL) {
+          st = BS_ERR_TYPE;
+          goto failed;
+        }
+        f->pending = (uint8_t)BS_PEND_NONE;
+        st = bs_push(e, a);
+        if (st != BS_OK) {
+          goto failed;
+        }
+        continue;
+      }
+
+      if (a.kind != (uint8_t)BS_T_BOOL) {
+        st = BS_ERR_TYPE;
+        goto failed;
+      }
+      if ((pend == (uint8_t)BS_PEND_ALL && !a.as.boolean) ||
+          (pend == (uint8_t)BS_PEND_ANY && a.as.boolean)) {
+        /* Decided: the rest of the container cannot change the answer. */
+        f->pending = (uint8_t)BS_PEND_NONE;
+        st = bs_push(e, bs_bool(pend == (uint8_t)BS_PEND_ANY));
+        if (st != BS_OK) {
+          goto failed;
+        }
+        continue;
+      }
+      f->index++;
+      if (f->index >= f->subject.as.list.count) {
+        f->pending = (uint8_t)BS_PEND_NONE;
+        st = bs_push(e, bs_bool(pend == (uint8_t)BS_PEND_ALL));
+        if (st != BS_OK) {
+          goto failed;
+        }
+        continue;
+      }
+      st = bs_enter_closure(e, &m, f->closure,
+                            &e->w->terms[f->subject.as.list.at + f->index]);
+      if (st != BS_OK) {
+        goto failed;
+      }
+      continue;
     }
-    op = &e->w->ops[expr.at + i];
+
+    if (f->pc >= f->expr.count) {
+      m.depth--;
+      continue;
+    }
+    if ((size_t)f->expr.at + (size_t)f->pc >= e->w->op_count) {
+      st = BS_ERR_MALFORMED;
+      goto failed;
+    }
+    op = &e->w->ops[f->expr.at + f->pc];
+    f->pc++;
 
     if (op->tag == (uint8_t)BS_OP_VALUE) {
       if ((size_t)op->as.term >= e->w->term_count) {
-        return BS_ERR_MALFORMED;
+        st = BS_ERR_MALFORMED;
+        goto failed;
       }
       st = bs_resolve(e, e->w->terms[op->as.term], &a);
       if (st != BS_OK) {
-        return st;
+        goto failed;
       }
       st = bs_push(e, a);
       if (st != BS_OK) {
-        return st;
+        goto failed;
       }
       continue;
     }
 
     if (op->tag == (uint8_t)BS_OP_CLOSURE) {
-      /* Closures are only meaningful as the operand of the operator that
-       * consumes them, and those operators are not implemented yet. Refusing
-       * is what keeps a half-evaluated expression from being reported as a
-       * decision. */
-      return BS_ERR_UNSUPPORTED;
+      /* A closure is a value until an operator decides what to do with it. */
+      result.kind = (uint8_t)BS_T_CLOSURE;
+      result.as.list.at = (uint32_t)((size_t)f->expr.at + (size_t)f->pc - 1U);
+      result.as.list.count = op->as.closure.count;
+      st = bs_push(e, result);
+      if (st != BS_OK) {
+        goto failed;
+      }
+      continue;
     }
 
     if (op->tag == (uint8_t)BS_OP_UNARY) {
       st = bs_pop(e, &a);
       if (st != BS_OK) {
-        return st;
+        goto failed;
       }
       switch (op->kind) {
       case BS_U_NEGATE:
         if (a.kind != (uint8_t)BS_T_BOOL) {
-          return BS_ERR_TYPE;
+          st = BS_ERR_TYPE;
+          goto failed;
         }
         st = bs_push(e, bs_bool(!a.as.boolean));
         break;
       case BS_U_PARENS:
-        /* Present only so the printer can reproduce the source. */
         st = bs_push(e, a);
         break;
       case BS_U_LENGTH:
@@ -539,16 +728,17 @@ static bs_status bs_expr_eval(bs_eval *e, bs_expr expr, int *out) {
         }
         break;
       case BS_U_TYPEOF:
-        st = bs_typeof(e, a, &b);
+        st = bs_typeof(e, a, &result);
         if (st == BS_OK) {
-          st = bs_push(e, b);
+          st = bs_push(e, result);
         }
         break;
       default:
-        return BS_ERR_UNSUPPORTED; /* external calls */
+        st = BS_ERR_UNSUPPORTED;
+        goto failed; /* external calls */
       }
       if (st != BS_OK) {
-        return st;
+        goto failed;
       }
       continue;
     }
@@ -556,21 +746,21 @@ static bs_status bs_expr_eval(bs_eval *e, bs_expr expr, int *out) {
     /* Binary. The right-hand side was pushed last. */
     st = bs_pop(e, &b);
     if (st != BS_OK) {
-      return st;
+      goto failed;
     }
     st = bs_pop(e, &a);
     if (st != BS_OK) {
-      return st;
+      goto failed;
     }
 
     switch (op->kind) {
-    case 0U: /* < */
-    case 1U: /* > */
-    case 2U: /* <= */
-    case 3U: /* >= */
+    case 0U:
+    case 1U:
+    case 2U:
+    case 3U:
       st = bs_compare(a, b, &cmp);
       if (st != BS_OK) {
-        return st;
+        goto failed;
       }
       flag = (op->kind == 0U)   ? (cmp < 0)
              : (op->kind == 1U) ? (cmp > 0)
@@ -579,37 +769,36 @@ static bs_status bs_expr_eval(bs_eval *e, bs_expr expr, int *out) {
       st = bs_push(e, bs_bool(flag));
       break;
 
-    case 4U:  /* === */
-    case 20U: /* !== */
+    case 4U:
+    case 20U:
       /* Strict: comparing different types is an error, not false. */
       if (a.kind != b.kind) {
-        return BS_ERR_TYPE;
+        st = BS_ERR_TYPE;
+        goto failed;
       }
       flag = bs_term_eq(e->w, a, b);
       st = bs_push(e, bs_bool((op->kind == 4U) ? flag : !flag));
       break;
 
-    case 21U: /* == */
-    case 22U: /* != */
+    case 21U:
+    case 22U:
       /* Lenient: different types are simply unequal. */
       flag = (a.kind == b.kind) && bs_term_eq(e->w, a, b);
       st = bs_push(e, bs_bool((op->kind == 21U) ? flag : !flag));
       break;
 
-    case 5U: /* .contains() */
+    case 5U:
       st = bs_contains(e, a, b, &flag);
       if (st == BS_OK) {
         st = bs_push(e, bs_bool(flag));
       }
       break;
 
-    case 9U:  /* + */
-    case 10U: /* - */
-    case 11U: /* * */
-    case 12U: /* / */
+    case 9U:
+    case 10U:
+    case 11U:
+    case 12U:
       if (a.kind != (uint8_t)BS_T_INTEGER || b.kind != (uint8_t)BS_T_INTEGER) {
-        /* `+` also concatenates strings, which needs somewhere to put the
-         * result; that arrives with the rest of the string operations. */
         return (op->kind == 9U) ? BS_ERR_UNSUPPORTED : BS_ERR_TYPE;
       }
       st = bs_arith(op->kind, a.as.integer, b.as.integer, &n);
@@ -618,21 +807,23 @@ static bs_status bs_expr_eval(bs_eval *e, bs_expr expr, int *out) {
       }
       break;
 
-    case 13U: /* &&, eager */
-    case 14U: /* ||, eager */
+    case 13U:
+    case 14U:
       if (a.kind != (uint8_t)BS_T_BOOL || b.kind != (uint8_t)BS_T_BOOL) {
-        return BS_ERR_TYPE;
+        st = BS_ERR_TYPE;
+        goto failed;
       }
       flag = (op->kind == 13U) ? (a.as.boolean && b.as.boolean)
                                : (a.as.boolean || b.as.boolean);
       st = bs_push(e, bs_bool(flag));
       break;
 
-    case 17U: /* & */
-    case 18U: /* | */
-    case 19U: /* ^ */
+    case 17U:
+    case 18U:
+    case 19U:
       if (a.kind != (uint8_t)BS_T_INTEGER || b.kind != (uint8_t)BS_T_INTEGER) {
-        return BS_ERR_TYPE;
+        st = BS_ERR_TYPE;
+        goto failed;
       }
       {
         uint64_t x = (uint64_t)a.as.integer;
@@ -644,34 +835,119 @@ static bs_status bs_expr_eval(bs_eval *e, bs_expr expr, int *out) {
       }
       break;
 
-    case 27U: /* .get() */
+    case 23U: /* && short-circuiting */
+    case 24U: /* || short-circuiting */
+      if (a.kind != (uint8_t)BS_T_BOOL || b.kind != (uint8_t)BS_T_CLOSURE) {
+        st = BS_ERR_TYPE;
+        goto failed;
+      }
+      /* The whole point: the right-hand side is not evaluated when the left
+       * already decides the answer. */
+      if ((op->kind == 23U && !a.as.boolean) ||
+          (op->kind == 24U && a.as.boolean)) {
+        st = bs_push(e, a);
+        break;
+      }
+      f->pending = (uint8_t)BS_PEND_LAZY;
+      f->bind_base = m.bind_count;
+      f->sp_base = e->sp;
+      st = bs_enter_closure(e, &m, b.as.list.at, NULL);
+      break;
+
+    case 25U: /* .all() */
+    case 26U: /* .any() */
+      if (b.kind != (uint8_t)BS_T_CLOSURE) {
+        st = BS_ERR_TYPE;
+        goto failed;
+      }
+      if (a.kind != (uint8_t)BS_T_SET && a.kind != (uint8_t)BS_T_ARRAY) {
+        /* A map is walked too, each entry passed as a two-element array;
+         * building that pair needs pool space and arrives with the rest of
+         * the container construction. */
+        return (a.kind == (uint8_t)BS_T_MAP) ? BS_ERR_UNSUPPORTED : BS_ERR_TYPE;
+      }
+      if (a.as.list.count == 0U) {
+        /* Vacuously true for all, vacuously false for any. */
+        st = bs_push(e, bs_bool(op->kind == 25U));
+        break;
+      }
+      f->pending =
+          (op->kind == 25U) ? (uint8_t)BS_PEND_ALL : (uint8_t)BS_PEND_ANY;
+      f->subject = a;
+      f->index = 0;
+      f->closure = b.as.list.at;
+      f->bind_base = m.bind_count;
+      f->sp_base = e->sp;
+      st = bs_enter_closure(e, &m, b.as.list.at, &e->w->terms[a.as.list.at]);
+      break;
+
+    case 27U:
       st = bs_get(e, a, b, &result);
       if (st == BS_OK) {
         st = bs_push(e, result);
       }
       break;
 
+    case 29U: /* .try_or() */
+      /* The closure is the left operand and the fallback the right, so the
+       * fallback is already evaluated when we get here -- which is fine,
+       * since it is a value and cannot fail. */
+      if (a.kind != (uint8_t)BS_T_CLOSURE) {
+        st = BS_ERR_TYPE;
+        goto failed;
+      }
+      f->pending = (uint8_t)BS_PEND_TRY;
+      f->fallback = b;
+      f->bind_base = m.bind_count;
+      f->sp_base = e->sp;
+      st = bs_enter_closure(e, &m, a.as.list.at, NULL);
+      break;
+
     default:
-      /* String operations, set algebra, closures and external calls. Refused
-       * rather than approximated: an operator that silently returns false is
-       * a check that silently passes. */
-      return BS_ERR_UNSUPPORTED;
+      /* String operations, set algebra and external calls. Refused rather
+       * than approximated: an operator that silently returns false is a check
+       * that silently passes. */
+      st = BS_ERR_UNSUPPORTED;
+      goto failed;
     }
     if (st != BS_OK) {
-      return st;
+      goto failed;
     }
   }
 
   if (e->sp != 1U) {
-    return BS_ERR_MALFORMED;
+    st = BS_ERR_MALFORMED;
+    goto failed;
   }
   if (e->stack[0].kind != (uint8_t)BS_T_BOOL) {
     /* "After executing, the stack must contain only one value, of the boolean
-     * type." An expression that leaves an integer is not false, it is wrong. */
-    return BS_ERR_TYPE;
+     * type." An expression that leaves an integer is not false; it is wrong. */
+    st = BS_ERR_TYPE;
+    goto failed;
   }
   *out = e->stack[0].as.boolean;
   return BS_OK;
+
+failed:
+  /* `try_or` is the one operator that turns a failure into a value. Unwind to
+   * the nearest frame waiting on one, restore the stack to where that frame
+   * left it, and hand it the fallback -- the closure's own error goes no
+   * further. Without a try_or in scope the failure is the answer. */
+  while (m.depth > 0U) {
+    bs_frame *g = &m.frames[m.depth - 1U];
+    if (g->pending == (uint8_t)BS_PEND_TRY) {
+      g->pending = (uint8_t)BS_PEND_NONE;
+      m.bind_count = g->bind_base;
+      e->binding_count = m.bind_count;
+      e->sp = g->sp_base;
+      if (bs_push(e, g->fallback) != BS_OK) {
+        return BS_ERR_LIMIT;
+      }
+      goto again;
+    }
+    m.depth--;
+  }
+  return st;
 }
 
 /* Evaluate one expression of the world, with the given variable bindings. */

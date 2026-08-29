@@ -547,6 +547,240 @@ static void test_stack_discipline(void) {
   CHECK(bs_expr_evaluate(&W, &SYMS, EXPR, NULL, 0U, NULL) == BS_ERR_ARGUMENT);
 }
 
+/* --------------------------------------------------------------------------
+ * Closures
+ * ----------------------------------------------------------------------- */
+
+/* A closure op whose body is the ops appended since `body_at`. */
+static void op_closure(uint32_t body_at, uint32_t body_count, uint64_t param,
+                       int has_param) {
+  uint32_t sym_at = (uint32_t)W.sym_count;
+  if (has_param) {
+    W.syms[W.sym_count] = param;
+    W.sym_count++;
+  }
+  W.ops[W.op_count].tag = (uint8_t)BS_OP_CLOSURE;
+  W.ops[W.op_count].kind = 0;
+  W.ops[W.op_count].as.closure.at = sym_at;
+  W.ops[W.op_count].as.closure.count = has_param ? 1U : 0U;
+  W.ops[W.op_count].as.closure.body.at = body_at;
+  W.ops[W.op_count].as.closure.body.count = body_count;
+  W.ops[W.op_count].as.closure.src = bs_span_make(NULL, 0U);
+  W.op_count++;
+  EXPR.count++;
+}
+
+/* Build a closure body out of line, then return where it sits. */
+static uint32_t body_begin(void) {
+  return (uint32_t)W.op_count;
+}
+
+static void body_value(bs_term t) {
+  W.ops[W.op_count].tag = (uint8_t)BS_OP_VALUE;
+  W.ops[W.op_count].kind = 0;
+  W.ops[W.op_count].as.term = term(t);
+  W.op_count++;
+}
+
+static void body_binary(uint32_t kind) {
+  W.ops[W.op_count].tag = (uint8_t)BS_OP_BINARY;
+  W.ops[W.op_count].kind = kind;
+  W.ops[W.op_count].as.ffi = 0;
+  W.op_count++;
+}
+
+static void test_short_circuit(void) {
+  int got = 0;
+  uint32_t at;
+
+  /* `false && <closure>`: the closure must not run. Its body is an expression
+   * that would fail loudly if it did -- a strict comparison across types --
+   * so a passing result proves the skip rather than merely suggesting it. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_int(1));
+  body_value(t_bool(1));
+  body_binary(4U); /* === across types: a type error if evaluated */
+  expr_begin();
+  op_value(t_bool(0));
+  op_closure(at, 3U, 0U, 0);
+  op_binary(23U); /* && */
+  CHECK(run(&got) == BS_OK && got == 0);
+
+  /* `true || <closure>`: likewise skipped. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_int(1));
+  body_value(t_bool(1));
+  body_binary(4U);
+  expr_begin();
+  op_value(t_bool(1));
+  op_closure(at, 3U, 0U, 0);
+  op_binary(24U); /* || */
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* `true && <closure>`: the closure does run, and its value is the answer. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_bool(0));
+  expr_begin();
+  op_value(t_bool(1));
+  op_closure(at, 1U, 0U, 0);
+  op_binary(23U);
+  CHECK(run(&got) == BS_OK && got == 0);
+
+  /* And when it does run, its errors are the expression's errors. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_int(1));
+  body_value(t_bool(1));
+  body_binary(4U);
+  expr_begin();
+  op_value(t_bool(1));
+  op_closure(at, 3U, 0U, 0);
+  op_binary(23U);
+  CHECK(run(&got) == BS_ERR_TYPE);
+}
+
+static void test_all_and_any(void) {
+  int got = 0;
+  uint32_t at;
+  bs_term items[3];
+
+  /* `[1, 2, 3].all($p -> $p > 0)` */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_var(2000U));
+  body_value(t_int(0));
+  body_binary(1U); /* > */
+  expr_begin();
+  items[0] = t_int(1);
+  items[1] = t_int(2);
+  items[2] = t_int(3);
+  op_value(t_list((uint8_t)BS_T_ARRAY, items, 3U));
+  op_closure(at, 3U, 2000U, 1);
+  op_binary(25U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* `.all()` is false as soon as one element fails, and must stop there. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_var(2000U));
+  body_value(t_int(2));
+  body_binary(4U); /* === 2 */
+  expr_begin();
+  items[0] = t_int(1);
+  items[1] = t_int(2);
+  items[2] = t_int(3);
+  op_value(t_list((uint8_t)BS_T_ARRAY, items, 3U));
+  op_closure(at, 3U, 2000U, 1);
+  op_binary(25U);
+  CHECK(run(&got) == BS_OK && got == 0);
+
+  /* `.any()` is true as soon as one element passes. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_var(2000U));
+  body_value(t_int(2));
+  body_binary(1U); /* > 2 */
+  expr_begin();
+  items[0] = t_int(1);
+  items[1] = t_int(2);
+  items[2] = t_int(3);
+  op_value(t_list((uint8_t)BS_T_ARRAY, items, 3U));
+  op_closure(at, 3U, 2000U, 1);
+  op_binary(26U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* An empty container: vacuously true for all, vacuously false for any. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_bool(0));
+  expr_begin();
+  op_value(t_list((uint8_t)BS_T_ARRAY, items, 0U));
+  op_closure(at, 1U, 2000U, 1);
+  op_binary(25U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_bool(1));
+  expr_begin();
+  op_value(t_list((uint8_t)BS_T_ARRAY, items, 0U));
+  op_closure(at, 1U, 2000U, 1);
+  op_binary(26U);
+  CHECK(run(&got) == BS_OK && got == 0);
+}
+
+static void test_shadowing_is_rejected(void) {
+  bs_binding bind[1];
+  int got = 0;
+  uint32_t at;
+  bs_term items[1];
+
+  /* "Shadowing (defining a parameter with the same name as a variable already
+   * in scope) is not allowed and should be rejected." */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_bool(1));
+  expr_begin();
+  items[0] = t_int(1);
+  op_value(t_list((uint8_t)BS_T_ARRAY, items, 1U));
+  op_closure(at, 1U, 3000U, 1);
+  op_binary(25U);
+
+  bind[0].sym = 3000U; /* the same name the closure parameter uses */
+  bind[0].value = t_int(9);
+  CHECK(bs_expr_evaluate(&W, &SYMS, EXPR, bind, 1U, &got) == BS_ERR_SHADOWED);
+}
+
+static void test_try_or(void) {
+  int got = 0;
+  uint32_t at;
+
+  /* `(true === 12).try_or(true)`: the closure fails with a type error, and
+   * try_or turns that failure into the fallback rather than propagating it.
+   * This is the one place in the language where an error becomes a value. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_bool(1));
+  body_value(t_int(12));
+  body_binary(4U); /* === across types */
+  expr_begin();
+  op_closure(at, 3U, 0U, 0);
+  op_value(t_bool(1));
+  op_binary(29U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* When the closure succeeds, its own value wins and the fallback is
+   * ignored -- `true == 12` is lenient, so it is false rather than an error,
+   * and false is the answer. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_bool(1));
+  body_value(t_int(12));
+  body_binary(21U); /* == across types: false, not an error */
+  expr_begin();
+  op_closure(at, 3U, 0U, 0);
+  op_value(t_bool(1));
+  op_binary(29U);
+  CHECK(run(&got) == BS_OK && got == 0);
+
+  /* An overflow inside the closure is caught the same way. */
+  CHECK(reset_world());
+  at = body_begin();
+  body_value(t_int(INT64_MAX));
+  body_value(t_int(1));
+  body_binary(9U); /* + overflows */
+  body_value(t_int(0));
+  body_binary(4U);
+  expr_begin();
+  op_closure(at, 5U, 0U, 0);
+  op_value(t_bool(1));
+  op_binary(29U);
+  CHECK(run(&got) == BS_OK && got == 1);
+}
+
 int main(void) {
   test_comparison();
   test_equality();
@@ -557,5 +791,9 @@ int main(void) {
   test_contains_and_get();
   test_bindings();
   test_stack_discipline();
+  test_short_circuit();
+  test_all_and_any();
+  test_shadowing_is_rejected();
+  test_try_or();
   return bs_test_finish();
 }
