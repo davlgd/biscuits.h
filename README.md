@@ -147,8 +147,8 @@ tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         6992 lines
-object -Os    52592 bytes
+header         7182 lines
+object -Os    54976 bytes
 ```
 <!-- metrics:end -->
 

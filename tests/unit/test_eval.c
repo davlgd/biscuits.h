@@ -160,7 +160,7 @@ static void op_unary(uint32_t kind) {
 }
 
 static bs_status run(int *out) {
-  return bs_expr_evaluate(&W, &SYMS, EXPR, NULL, 0U, out);
+  return bs_expr_evaluate(&W, &SYMS, &A, EXPR, NULL, 0U, out);
 }
 
 /* `a OP b`, the shape almost every case below takes. */
@@ -495,12 +495,13 @@ static void test_bindings(void) {
 
   bind[0].sym = 1024U;
   bind[0].value = t_int(1);
-  CHECK(bs_expr_evaluate(&W, &SYMS, EXPR, bind, 1U, &got) == BS_OK && got == 1);
+  CHECK(bs_expr_evaluate(&W, &SYMS, &A, EXPR, bind, 1U, &got) == BS_OK &&
+        got == 1);
 
   /* An unbound variable. The specification requires every variable in an
    * expression to appear in a predicate of the same rule, so reaching this
    * means the rule should have been rejected earlier. */
-  CHECK(bs_expr_evaluate(&W, &SYMS, EXPR, NULL, 0U, &got) == BS_ERR_TYPE);
+  CHECK(bs_expr_evaluate(&W, &SYMS, &A, EXPR, NULL, 0U, &got) == BS_ERR_TYPE);
 }
 
 static void test_stack_discipline(void) {
@@ -543,8 +544,10 @@ static void test_stack_discipline(void) {
   op_value(t_bool(1));
   CHECK(run(&got) == BS_OK && got == 1);
 
-  CHECK(bs_expr_evaluate(NULL, &SYMS, EXPR, NULL, 0U, &got) == BS_ERR_ARGUMENT);
-  CHECK(bs_expr_evaluate(&W, &SYMS, EXPR, NULL, 0U, NULL) == BS_ERR_ARGUMENT);
+  CHECK(bs_expr_evaluate(NULL, &SYMS, &A, EXPR, NULL, 0U, &got) ==
+        BS_ERR_ARGUMENT);
+  CHECK(bs_expr_evaluate(&W, &SYMS, &A, EXPR, NULL, 0U, NULL) ==
+        BS_ERR_ARGUMENT);
 }
 
 /* --------------------------------------------------------------------------
@@ -731,7 +734,8 @@ static void test_shadowing_is_rejected(void) {
 
   bind[0].sym = 3000U; /* the same name the closure parameter uses */
   bind[0].value = t_int(9);
-  CHECK(bs_expr_evaluate(&W, &SYMS, EXPR, bind, 1U, &got) == BS_ERR_SHADOWED);
+  CHECK(bs_expr_evaluate(&W, &SYMS, &A, EXPR, bind, 1U, &got) ==
+        BS_ERR_SHADOWED);
 }
 
 static void test_try_or(void) {
@@ -781,6 +785,165 @@ static void test_try_or(void) {
   CHECK(run(&got) == BS_OK && got == 1);
 }
 
+/* --------------------------------------------------------------------------
+ * Operators that build values
+ * ----------------------------------------------------------------------- */
+
+static void test_affixes(void) {
+  /* "alphabet" starts with "alpha" and does not start with "beta". */
+  CHECK(yields(t_str(1026U), t_str(1024U), 6U, 1));
+  CHECK(yields(t_str(1026U), t_str(1025U), 6U, 0));
+  /* A longer needle than haystack is false, not an error. */
+  CHECK(yields(t_str(1024U), t_str(1026U), 6U, 0));
+  /* And ends_with, which is the same walk from the other end. */
+  CHECK(yields(t_str(1026U), t_str(1026U), 7U, 1));
+
+  CHECK(fails(t_str(1024U), t_int(1), 6U, BS_ERR_TYPE));
+  CHECK(fails(t_int(1), t_int(1), 6U, BS_ERR_TYPE));
+
+  /* Arrays compare element by element, because two arrays holding equal
+   * values may hold them at different offsets in the pool. */
+  {
+    bs_term items[3];
+    bs_term part[2];
+    int got = 0;
+    CHECK(reset_world());
+    expr_begin();
+    items[0] = t_int(1);
+    items[1] = t_int(2);
+    items[2] = t_int(3);
+    op_value(t_list((uint8_t)BS_T_ARRAY, items, 3U));
+    part[0] = t_int(1);
+    part[1] = t_int(2);
+    op_value(t_list((uint8_t)BS_T_ARRAY, part, 2U));
+    op_binary(6U);
+    CHECK(run(&got) == BS_OK && got == 1);
+
+    CHECK(reset_world());
+    expr_begin();
+    items[0] = t_int(1);
+    items[1] = t_int(2);
+    items[2] = t_int(3);
+    op_value(t_list((uint8_t)BS_T_ARRAY, items, 3U));
+    part[0] = t_int(3);
+    op_value(t_list((uint8_t)BS_T_ARRAY, part, 1U));
+    op_binary(7U); /* ends_with */
+    CHECK(run(&got) == BS_OK && got == 1);
+  }
+}
+
+static void test_string_concat(void) {
+  int got = 0;
+
+  /* "alpha" + "bet" === "alphabet". The joined text is built in the arena and
+   * interned, so the comparison is an ordinary symbol comparison -- and the
+   * result lands on the *existing* symbol for "alphabet" rather than a new
+   * one, which is what makes it compare equal at all. */
+  CHECK(reset_world());
+  expr_begin();
+  {
+    uint64_t bet = 0;
+    CHECK(bs_symtab_intern(&SYMS, bs_span_make("bet", 3U), &bet) == BS_OK);
+    op_value(t_str(1024U)); /* "alpha" */
+    op_value(t_str(bet));
+  }
+  op_binary(9U);          /* + */
+  op_value(t_str(1026U)); /* "alphabet" */
+  op_binary(4U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* Joining a string with something else is a type error, not a coercion. */
+  CHECK(fails(t_str(1024U), t_int(1), 9U, BS_ERR_TYPE));
+}
+
+static void test_set_algebra(void) {
+  int got = 0;
+  bs_term a[3];
+  bs_term b[3];
+
+  /* {1,2,3}.intersection({2,3,4}) === {2,3} */
+  CHECK(reset_world());
+  expr_begin();
+  a[0] = t_int(1);
+  a[1] = t_int(2);
+  a[2] = t_int(3);
+  op_value(t_list((uint8_t)BS_T_SET, a, 3U));
+  b[0] = t_int(2);
+  b[1] = t_int(3);
+  b[2] = t_int(4);
+  op_value(t_list((uint8_t)BS_T_SET, b, 3U));
+  op_binary(15U);
+  a[0] = t_int(2);
+  a[1] = t_int(3);
+  op_value(t_list((uint8_t)BS_T_SET, a, 2U));
+  op_binary(4U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* {1,2}.union({2,3}) === {1,2,3}, with 2 appearing once: a result that
+   * repeated an element would not compare equal to the same set written by
+   * hand. */
+  CHECK(reset_world());
+  expr_begin();
+  a[0] = t_int(1);
+  a[1] = t_int(2);
+  op_value(t_list((uint8_t)BS_T_SET, a, 2U));
+  b[0] = t_int(2);
+  b[1] = t_int(3);
+  op_value(t_list((uint8_t)BS_T_SET, b, 2U));
+  op_binary(16U);
+  op_unary(BS_U_LENGTH);
+  op_value(t_int(3));
+  op_binary(4U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  /* An empty intersection is an empty set, not an error. */
+  CHECK(reset_world());
+  expr_begin();
+  a[0] = t_int(1);
+  op_value(t_list((uint8_t)BS_T_SET, a, 1U));
+  b[0] = t_int(9);
+  op_value(t_list((uint8_t)BS_T_SET, b, 1U));
+  op_binary(15U);
+  op_unary(BS_U_LENGTH);
+  op_value(t_int(0));
+  op_binary(4U);
+  CHECK(run(&got) == BS_OK && got == 1);
+
+  CHECK(fails(t_int(1), t_int(2), 15U, BS_ERR_TYPE));
+}
+
+static void test_evaluation_is_transient(void) {
+  int got = 0;
+  size_t terms_before;
+  size_t syms_before;
+  bs_term a[2];
+
+  /* An expression leaves one boolean behind, so everything it built on the
+   * way is unreachable afterwards. Giving it back is what stops a block with
+   * twenty expressions from costing twenty times what one costs. */
+  CHECK(reset_world());
+  expr_begin();
+  a[0] = t_int(1);
+  a[1] = t_int(2);
+  op_value(t_list((uint8_t)BS_T_SET, a, 2U));
+  op_value(t_list((uint8_t)BS_T_SET, a, 2U));
+  op_binary(16U); /* union: builds a new set in the pool */
+  op_unary(BS_U_LENGTH);
+  op_value(t_int(2));
+  op_binary(4U);
+
+  terms_before = W.term_count;
+  syms_before = SYMS.count;
+  CHECK(run(&got) == BS_OK && got == 1);
+  CHECK(W.term_count == terms_before);
+  CHECK(SYMS.count == syms_before);
+
+  /* Running it again must give the same answer, which it cannot if the first
+   * run left the pools in a different state. */
+  CHECK(run(&got) == BS_OK && got == 1);
+  CHECK(W.term_count == terms_before);
+}
+
 int main(void) {
   test_comparison();
   test_equality();
@@ -795,5 +958,9 @@ int main(void) {
   test_all_and_any();
   test_shadowing_is_rejected();
   test_try_or();
+  test_affixes();
+  test_string_concat();
+  test_set_algebra();
+  test_evaluation_is_transient();
   return bs_test_finish();
 }

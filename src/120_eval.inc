@@ -31,6 +31,7 @@
 typedef struct bs_eval {
   bs_world *w;
   bs_symtab *syms;
+  bs_arena *arena; /* scratch for values an operator builds, rewound after */
   const bs_binding *bindings;
   size_t binding_count;
   bs_term stack[BS_MAX_EVAL_STACK];
@@ -429,6 +430,139 @@ static bs_status bs_contains(const bs_eval *e, bs_term hay, bs_term needle,
   }
 }
 
+/* Prefix and suffix, on strings and on arrays.
+ *
+ * The array case compares element by element rather than by run, because two
+ * arrays holding equal values may hold them at different pool offsets. */
+static bs_status bs_affix(const bs_eval *e, bs_term whole, bs_term part,
+                          int suffix, int *out) {
+  if (whole.kind != part.kind) {
+    return BS_ERR_TYPE;
+  }
+  if (whole.kind == (uint8_t)BS_T_STRING) {
+    bs_span h;
+    bs_span n;
+    bs_span window;
+    if (!bs_symtab_get(e->syms, whole.as.sym, &h) ||
+        !bs_symtab_get(e->syms, part.as.sym, &n)) {
+      return BS_ERR_TYPE;
+    }
+    if (n.n > h.n) {
+      *out = 0;
+      return BS_OK;
+    }
+    *out = bs_span_slice(h, suffix ? (h.n - n.n) : 0U, n.n, &window) &&
+           bs_span_eq(window, n);
+    return BS_OK;
+  }
+  if (whole.kind == (uint8_t)BS_T_ARRAY) {
+    uint32_t i;
+    uint32_t off;
+    if (part.as.list.count > whole.as.list.count) {
+      *out = 0;
+      return BS_OK;
+    }
+    off = suffix ? (whole.as.list.count - part.as.list.count) : 0U;
+    for (i = 0; i < part.as.list.count; i++) {
+      if (!bs_term_eq(e->w, e->w->terms[whole.as.list.at + off + i],
+                      e->w->terms[part.as.list.at + i])) {
+        *out = 0;
+        return BS_OK;
+      }
+    }
+    *out = 1;
+    return BS_OK;
+  }
+  return BS_ERR_TYPE;
+}
+
+/* String concatenation.
+ *
+ * The result is a string, and strings are symbol indices, so the joined text
+ * has to live somewhere and then be interned. It goes in the evaluation
+ * arena, which is rewound when the expression finishes -- along with the
+ * symbol table, so a symbol invented mid-expression does not outlive it and
+ * leave the table holding a span into reclaimed scratch. */
+static bs_status bs_str_concat(bs_eval *e, bs_term a, bs_term b, bs_term *out) {
+  bs_span x;
+  bs_span y;
+  size_t total;
+  uint8_t *buf;
+
+  if (a.kind != (uint8_t)BS_T_STRING || b.kind != (uint8_t)BS_T_STRING) {
+    return BS_ERR_TYPE;
+  }
+  if (!bs_symtab_get(e->syms, a.as.sym, &x) ||
+      !bs_symtab_get(e->syms, b.as.sym, &y)) {
+    return BS_ERR_TYPE;
+  }
+  if (!bs_size_add(x.n, y.n, &total)) {
+    return BS_ERR_OVERFLOW;
+  }
+  buf = (uint8_t *)bs_arena_alloc(e->arena, (total == 0U) ? 1U : total, 1U);
+  if (buf == NULL) {
+    return BS_ERR_NOMEM;
+  }
+  if (x.n != 0U) {
+    memcpy(buf, x.p, x.n);
+  }
+  if (y.n != 0U) {
+    memcpy(&buf[x.n], y.p, y.n);
+  }
+  out->kind = (uint8_t)BS_T_STRING;
+  return bs_symtab_intern(e->syms, bs_span_make(buf, total), &out->as.sym);
+}
+
+/* Intersection and union, which build a new set in the term pool.
+ *
+ * Both deduplicate as they go, because a set is a deduplicated collection and
+ * a result that repeated an element would not compare equal to the same set
+ * written by hand. */
+static bs_status bs_set_op(bs_eval *e, bs_term a, bs_term b, int is_union,
+                           bs_term *out) {
+  uint32_t start;
+  uint32_t i;
+
+  if (a.kind != (uint8_t)BS_T_SET || b.kind != (uint8_t)BS_T_SET) {
+    return BS_ERR_TYPE;
+  }
+  start = (uint32_t)e->w->term_count;
+
+  for (i = 0; i < a.as.list.count; i++) {
+    bs_term v = e->w->terms[a.as.list.at + i];
+    int keep =
+        is_union ? 1 : bs_run_contains(e->w, b.as.list.at, b.as.list.count, v);
+    if (!keep ||
+        bs_run_contains(e->w, start, (uint32_t)e->w->term_count - start, v)) {
+      continue;
+    }
+    if (e->w->term_count >= e->w->term_cap) {
+      return BS_ERR_NOMEM;
+    }
+    e->w->terms[e->w->term_count] = v;
+    e->w->term_count++;
+  }
+
+  if (is_union) {
+    for (i = 0; i < b.as.list.count; i++) {
+      bs_term v = e->w->terms[b.as.list.at + i];
+      if (bs_run_contains(e->w, start, (uint32_t)e->w->term_count - start, v)) {
+        continue;
+      }
+      if (e->w->term_count >= e->w->term_cap) {
+        return BS_ERR_NOMEM;
+      }
+      e->w->terms[e->w->term_count] = v;
+      e->w->term_count++;
+    }
+  }
+
+  out->kind = (uint8_t)BS_T_SET;
+  out->as.list.at = start;
+  out->as.list.count = (uint32_t)e->w->term_count - start;
+  return BS_OK;
+}
+
 /* `.get()`: an element of an array by position, or a value of a map by key.
  * Out of range is `null` rather than an error, which is what makes `get`
  * usable without a length check in front of it. */
@@ -794,12 +928,39 @@ again:
       }
       break;
 
+    case 6U: /* .starts_with() */
+    case 7U: /* .ends_with() */
+      st = bs_affix(e, a, b, (op->kind == 7U), &flag);
+      if (st == BS_OK) {
+        st = bs_push(e, bs_bool(flag));
+      }
+      break;
+
+    case 15U: /* .intersection() */
+    case 16U: /* .union() */
+      st = bs_set_op(e, a, b, (op->kind == 16U), &result);
+      if (st == BS_OK) {
+        st = bs_push(e, result);
+      }
+      break;
+
     case 9U:
     case 10U:
     case 11U:
     case 12U:
+      if (op->kind == 9U && a.kind == (uint8_t)BS_T_STRING) {
+        /* `+` joins strings as well as adding integers. */
+        st = bs_str_concat(e, a, b, &result);
+        if (st == BS_OK) {
+          st = bs_push(e, result);
+        }
+        break;
+      }
       if (a.kind != (uint8_t)BS_T_INTEGER || b.kind != (uint8_t)BS_T_INTEGER) {
-        return (op->kind == 9U) ? BS_ERR_UNSUPPORTED : BS_ERR_TYPE;
+        /* A plain `return` here would step around the try_or unwinding
+         * below, which is exactly what an error inside a try_or must not do. */
+        st = BS_ERR_TYPE;
+        goto failed;
       }
       st = bs_arith(op->kind, a.as.integer, b.as.integer, &n);
       if (st == BS_OK) {
@@ -951,17 +1112,46 @@ failed:
 }
 
 /* Evaluate one expression of the world, with the given variable bindings. */
-BS_API bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms, bs_expr expr,
-                                  const bs_binding *bindings,
+BS_API bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms, bs_arena *a,
+                                  bs_expr expr, const bs_binding *bindings,
                                   size_t binding_count, int *out) {
   bs_eval e;
-  if (w == NULL || syms == NULL || out == NULL) {
+  size_t term_mark;
+  size_t sym_mark;
+  size_t arena_mark;
+  bs_status st;
+
+  if (w == NULL || syms == NULL || a == NULL || out == NULL) {
     return BS_ERR_ARGUMENT;
   }
   e.w = w;
   e.syms = syms;
+  e.arena = a;
   e.bindings = bindings;
   e.binding_count = binding_count;
   e.sp = 0;
-  return bs_expr_eval(&e, expr, out);
+
+  /* An expression leaves exactly one boolean behind, so every value it built
+   * on the way -- a joined string, an intersected set, the symbol either of
+   * them needed -- is unreachable the moment it returns. Giving all of it
+   * back here is what stops a block with twenty expressions from costing
+   * twenty times what one costs.
+   *
+   * The symbol table is rewound with the rest, and it has to be: its entries
+   * are spans, and a symbol interned from arena scratch would otherwise
+   * outlive the bytes it points at. */
+  term_mark = w->term_count;
+  sym_mark = syms->count;
+  arena_mark = bs_arena_mark(a);
+
+  st = bs_expr_eval(&e, expr, out);
+
+  /* cppcheck-suppress redundantAssignment ; only redundant for an expression
+   * that built nothing. One that intersects two sets or joins two strings
+   * moves both counters, and cppcheck cannot see that path from here. */
+  w->term_count = term_mark;
+  /* cppcheck-suppress redundantAssignment ; as above */
+  syms->count = sym_mark;
+  bs_arena_rewind(a, arena_mark);
+  return st;
 }

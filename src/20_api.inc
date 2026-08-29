@@ -677,6 +677,6 @@ typedef struct bs_binding {
  * malformed opcode stream are different outcomes, and the specification's own
  * conformance suite tells them apart. */
 BS_API BS_MUST_USE bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms,
-                                              bs_expr expr,
+                                              bs_arena *a, bs_expr expr,
                                               const bs_binding *bindings,
                                               size_t binding_count, int *out);
