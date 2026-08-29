@@ -87,6 +87,8 @@ BS_API const char *bs_strstatus(bs_status st) {
       "nesting too deep",
       "arithmetic overflow",
       "evaluation limit reached",
+      "type error",
+      "shadowed variable",
       "unsupported by this build",
       "signature verification failed",
   };

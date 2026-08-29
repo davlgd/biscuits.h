@@ -17,12 +17,14 @@
 
 typedef enum bs_status {
   BS_OK = 0,
-  BS_ERR_ARGUMENT,    /* caller passed a null or nonsensical argument */
-  BS_ERR_NOMEM,       /* the caller-provided arena is exhausted */
-  BS_ERR_MALFORMED,   /* input violates the wire format, truncation included */
-  BS_ERR_DEPTH,       /* nesting deeper than BS_MAX_DEPTH */
-  BS_ERR_OVERFLOW,    /* an arithmetic operation overflowed */
-  BS_ERR_LIMIT,       /* a configured evaluation limit was reached */
+  BS_ERR_ARGUMENT,  /* caller passed a null or nonsensical argument */
+  BS_ERR_NOMEM,     /* the caller-provided arena is exhausted */
+  BS_ERR_MALFORMED, /* input violates the wire format, truncation included */
+  BS_ERR_DEPTH,     /* nesting deeper than BS_MAX_DEPTH */
+  BS_ERR_OVERFLOW,  /* an arithmetic operation overflowed */
+  BS_ERR_LIMIT,     /* a configured evaluation limit was reached */
+  BS_ERR_TYPE,      /* an operation applied to an operand of the wrong type */
+  BS_ERR_SHADOWED, /* a closure parameter shadows a variable already in scope */
   BS_ERR_UNSUPPORTED, /* well-formed, but this build cannot handle it */
   BS_ERR_SIGNATURE,   /* a signature did not verify */
   BS_STATUS_COUNT,    /* not a status; keep last */
@@ -652,3 +654,24 @@ BS_API BS_MUST_USE bs_status bs_world_load_facts(bs_world *w, bs_symtab *syms,
 BS_API BS_MUST_USE bs_status bs_world_load_logic(
     bs_world *w, bs_symtab *syms, const bs_symbols *from, const bs_token *t,
     const bs_tables *tab, bs_span block, size_t block_index);
+
+/* ---------------------------------------------------------------------------
+ * Expression evaluation
+ * ------------------------------------------------------------------------ */
+
+/* A variable's value for the duration of one evaluation, taken from the
+ * predicates a rule matched. */
+typedef struct bs_binding {
+  uint64_t sym;
+  bs_term value;
+} bs_binding;
+
+/* Evaluate one expression to a boolean.
+ *
+ * Failure modes are distinct on purpose: an overflow, a type error and a
+ * malformed opcode stream are different outcomes, and the specification's own
+ * conformance suite tells them apart. */
+BS_API BS_MUST_USE bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms,
+                                              bs_expr expr,
+                                              const bs_binding *bindings,
+                                              size_t binding_count, int *out);
