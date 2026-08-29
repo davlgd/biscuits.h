@@ -116,7 +116,8 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Token container decoder | done — **43/43** on the revocation-id tier |
 | Output writer and symbol table | done |
 | Term printer | done — recursion-free, depth-bounded |
-| Block decoder and Datalog printer | in progress — unlocks the `blocks` tier |
+| Expression printer | done — opcode stream back to source, closures included |
+| Block and Datalog printer | done — **43/43** on the blocks tier |
 | Base64url | not started |
 | Ed25519 verification | not started |
 | Datalog engine | not started |
@@ -125,13 +126,19 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Authorizer | not started |
 | ECDSA secp256r1 | deferred to 1.1 |
 
-318 unit assertions, all sanitizer- and analyser-clean. Measured on the current
+Three of the four conformance tiers are green: every well-formed sample token
+decodes, reports byte-identical revocation identifiers, and prints back to the
+exact Datalog source the specification records — expressions, closures,
+third-party blocks and public-key interning included. What remains is
+verification and authorization.
+
+355 unit assertions, all sanitizer- and analyser-clean. Measured on the current
 tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         2276 lines
-object -Os    15952 bytes
+header         3149 lines
+object -Os    24448 bytes
 ```
 <!-- metrics:end -->
 

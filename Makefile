@@ -130,8 +130,11 @@ unit: $(UNIT_BINS)
 	    if ./$$t; then :; else fail=1; fi; \
 	done; exit $$fail
 
+# -MMD emits the header dependencies the compiler actually saw. Listing them
+# by hand is how a test stops being rebuilt after its harness changes -- which
+# happened here, and showed up only as an assertion count that quietly dropped.
 $(BUILD)/unit_%: tests/unit/%.c $(HEADER) | $(BUILD)
-	@$(CC) $(CFLAGS_DEBUG) $< -o $@
+	@$(CC) $(CFLAGS_DEBUG) -MMD -MF $(BUILD)/unit_$*.d $< -o $@
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -143,7 +146,7 @@ $(BUILD):
 CONFORMANCE_SHIM := $(BUILD)/conformance_shim
 
 $(CONFORMANCE_SHIM): $(SHIM_SRC) $(HEADER) | $(BUILD)
-	@$(CC) $(CFLAGS_DEBUG) $< -o $@
+	@$(CC) $(CFLAGS_DEBUG) -MMD -MF $(BUILD)/shim.d $< -o $@
 
 .PHONY: conformance
 conformance: $(CONFORMANCE_SHIM)
@@ -247,6 +250,8 @@ metrics: $(HEADER)
 .PHONY: check-metrics
 check-metrics: $(HEADER)
 	@$(PYTHON) tools/metrics.py --cc $(CC) --check
+
+-include $(wildcard $(BUILD)/*.d)
 
 .PHONY: clean
 clean:

@@ -19,7 +19,12 @@
 
 /* Grows as the library does. Each name here is a promise the runner will
  * hold us to; adding one before it works turns a skip into a failure. */
-static const char *const CAPABILITIES[] = {"decode", "revocation_ids", NULL};
+static const char *const CAPABILITIES[] = {
+    "decode",
+    "revocation_ids",
+    "blocks",
+    NULL,
+};
 
 /* The arena for one token. Sized generously for a test tool; the point of the
  * peak reporting is to learn what a real deployment would need. */
@@ -67,15 +72,80 @@ static void emit_hex(bs_span s) {
   }
 }
 
-static void emit_token(const bs_token *t) {
+/* JSON string escaping. The block source contains newlines and quotes, and
+ * the runner parses this with a real JSON parser, so it has to be right. */
+static void emit_json_string(const char *p, size_t n) {
   size_t i;
+  (void)putchar('"');
+  for (i = 0; i < n; i++) {
+    unsigned char ch = (unsigned char)p[i];
+    switch (ch) {
+    case '"':
+      (void)fputs("\\\"", stdout);
+      break;
+    case '\\':
+      (void)fputs("\\\\", stdout);
+      break;
+    case '\n':
+      (void)fputs("\\n", stdout);
+      break;
+    case '\r':
+      (void)fputs("\\r", stdout);
+      break;
+    case '\t':
+      (void)fputs("\\t", stdout);
+      break;
+    default:
+      if (ch < 0x20U) {
+        (void)printf("\\u%04x", ch);
+      } else {
+        (void)putchar((int)ch);
+      }
+      break;
+    }
+  }
+  (void)putchar('"');
+}
+
+static char block_buf[64 * 1024];
+
+static void emit_token(const bs_token *t, bs_arena *arena) {
+  bs_tables tab;
+  size_t i;
+
   (void)printf("{\"decode\":\"ok\",\"revocation_ids\":[");
   for (i = 0; i < t->block_count; i++) {
     (void)printf("%s\"", (i > 0) ? "," : "");
     emit_hex(bs_token_revocation_id(t, i));
     (void)putchar('"');
   }
-  (void)printf("]}\n");
+  (void)printf("]");
+
+  if (bs_tables_build(arena, t, &tab) == BS_OK) {
+    (void)printf(",\"blocks\":[");
+    for (i = 0; i < t->block_count; i++) {
+      bs_writer w;
+      bs_tables own;
+      const bs_tables *use = &tab;
+      /* A third-party block numbers only its own symbols and keys. */
+      if (t->blocks[i].has_external &&
+          bs_tables_build_block(arena, t->blocks[i].block, &own) == BS_OK) {
+        use = &own;
+      }
+      (void)bs_writer_init(&w, block_buf, sizeof block_buf);
+      if (bs_block_print(&w, arena, use, t->blocks[i].block) != BS_OK) {
+        (void)printf("%snull", (i > 0) ? "," : "");
+        continue;
+      }
+      if (i > 0) {
+        (void)putchar(',');
+      }
+      emit_json_string(block_buf, bs_writer_len(&w));
+    }
+    (void)printf("]");
+  }
+
+  (void)printf("}\n");
 }
 
 int main(int argc, char **argv) {
@@ -130,7 +200,7 @@ int main(int argc, char **argv) {
       emit_decode_error(st);
       return 0;
     }
-    emit_token(&token);
+    emit_token(&token, &arena);
   }
   return 0;
 }

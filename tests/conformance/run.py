@@ -176,6 +176,13 @@ def compare(tier: str, expected, actual) -> tuple:
         return True, ""
 
     if tier == "blocks":
+        # For a token the sample expects to fail at the format or signature
+        # level, `token[].code` describes the block contents as minted, not as
+        # transmitted: test006 reorders the blocks and test003 truncates a
+        # signature, so the bytes on the wire no longer match the listing.
+        # Comparing against it there would score a correct reader as wrong.
+        if not expected["ok"] and expected.get("kind") in DECODE_FAILURE_KINDS | {"signature"}:
+            return None, "sample lists the token as minted, not as transmitted"
         want = expected["blocks"]
         got = actual.get("blocks", [])
         if len(want) != len(got):

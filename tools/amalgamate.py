@@ -33,6 +33,8 @@ PARTS = [
     "75_symbols.inc",
     "80_term.inc",
     "85_block.inc",
+    "90_expr.inc",
+    "95_datalog.inc",
     "99_epilogue.inc",
 ]
 

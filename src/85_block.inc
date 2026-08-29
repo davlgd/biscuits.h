@@ -67,13 +67,24 @@ static bs_status bs_repeated(bs_span msg, uint32_t field, bs_span *out,
   return BS_OK;
 }
 
-/* Build the token-wide symbol and public-key tables.
+static int bs_pubkey_eq(const bs_public_key *x, const bs_public_key *y) {
+  return x->alg == y->alg && bs_span_eq(x->key, y->key);
+}
+
+/* Collect the symbol and public-key tables from a run of blocks.
  *
- * Both are read-only views over the token's own bytes: the arena holds the
- * two index arrays and nothing else, so a token of any size costs two
- * allocations here rather than one per symbol. */
-BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
-                                 bs_tables *out) {
+ * `skip_external` reproduces the rule in the specification's reference
+ * decoder: a block carrying an external signature contributes nothing to the
+ * token-wide tables. Its symbols and keys belong to the third party that
+ * signed it, who never saw the rest of the token, so folding them in would
+ * shift every index that follows.
+ *
+ * Public keys are deduplicated on insertion -- a key already in the table
+ * keeps its index rather than gaining a second one. Symbols are not: they are
+ * appended as they come. */
+static bs_status bs_tables_collect(bs_arena *a, const bs_signed_block *blocks,
+                                   size_t block_count, int skip_external,
+                                   bs_tables *out) {
   size_t total_symbols = 0;
   size_t total_keys = 0;
   size_t block;
@@ -84,27 +95,25 @@ BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
    * the point of use would hide that. */
   bs_span *sym_slots = NULL;
 
-  if (a == NULL || t == NULL || out == NULL || t->blocks == NULL) {
-    return BS_ERR_ARGUMENT;
-  }
-
   out->symbols.entries = NULL;
   out->symbols.count = 0;
   out->public_keys = NULL;
   out->public_key_count = 0;
 
-  for (block = 0; block < t->block_count; block++) {
+  for (block = 0; block < block_count; block++) {
     size_t n;
-    bs_status st =
-        bs_repeated(t->blocks[block].block, BS_F_BLOCK_SYMBOLS, NULL, 0U, &n);
+    bs_status st;
+    if (skip_external && blocks[block].has_external) {
+      continue;
+    }
+    st = bs_repeated(blocks[block].block, BS_F_BLOCK_SYMBOLS, NULL, 0U, &n);
     if (st != BS_OK) {
       return st;
     }
     if (!bs_size_add(total_symbols, n, &total_symbols)) {
       return BS_ERR_OVERFLOW;
     }
-    st = bs_repeated(t->blocks[block].block, BS_F_BLOCK_PUBLIC_KEYS, NULL, 0U,
-                     &n);
+    st = bs_repeated(blocks[block].block, BS_F_BLOCK_PUBLIC_KEYS, NULL, 0U, &n);
     if (st != BS_OK) {
       return st;
     }
@@ -128,9 +137,13 @@ BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
     }
   }
 
-  for (block = 0; block < t->block_count; block++) {
-    bs_cursor c = bs_cursor_make(t->blocks[block].block);
+  for (block = 0; block < block_count; block++) {
+    bs_cursor c;
     bs_pb_field f;
+    if (skip_external && blocks[block].has_external) {
+      continue;
+    }
+    c = bs_cursor_make(blocks[block].block);
     while (!bs_cursor_done(&c)) {
       if (!bs_pb_next(&c, &f)) {
         return BS_ERR_MALFORMED;
@@ -139,27 +152,77 @@ BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
         continue;
       }
       if (f.number == BS_F_BLOCK_SYMBOLS) {
-        BS_ASSERT(sym_at < total_symbols);
+        /* The counting pass allocated exactly as many slots as this pass will
+         * fill. If the two ever disagree the input changed underneath us,
+         * which cannot happen -- but saying so here is what lets the static
+         * analyser see that the array is non-null and in range. */
+        if (sym_slots == NULL || sym_at >= total_symbols) {
+          return BS_ERR_MALFORMED;
+        }
         sym_slots[sym_at] = f.bytes;
         sym_at++;
       } else if (f.number == BS_F_BLOCK_PUBLIC_KEYS) {
-        bs_status st;
-        BS_ASSERT(key_at < total_keys);
-        st = bs_pb_pubkey(f.bytes, &out->public_keys[key_at]);
+        bs_public_key key;
+        bs_status st = bs_pb_pubkey(f.bytes, &key);
+        size_t seen;
+        int duplicate = 0;
         if (st != BS_OK) {
           return st;
         }
-        key_at++;
+        for (seen = 0; seen < key_at && out->public_keys != NULL; seen++) {
+          if (bs_pubkey_eq(&out->public_keys[seen], &key)) {
+            duplicate = 1;
+            break;
+          }
+        }
+        if (!duplicate) {
+          if (out->public_keys == NULL || key_at >= total_keys) {
+            return BS_ERR_MALFORMED;
+          }
+          out->public_keys[key_at] = key;
+          key_at++;
+        }
       }
     }
   }
 
   BS_ASSERT(sym_at == total_symbols);
-  BS_ASSERT(key_at == total_keys);
+  BS_ASSERT(key_at <= total_keys); /* duplicates were folded away */
   out->symbols.entries = sym_slots;
   out->symbols.count = total_symbols;
   out->public_key_count = total_keys;
   return BS_OK;
+}
+
+/* The token-wide tables: every block's symbols and keys, in block order.
+ *
+ * These are the tables a regular block is read against. A third-party block
+ * is not -- see bs_tables_build_block. */
+BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
+                                 bs_tables *out) {
+  if (a == NULL || t == NULL || out == NULL || t->blocks == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  return bs_tables_collect(a, t->blocks, t->block_count, 1, out);
+}
+
+/* The tables of a single block, standing alone.
+ *
+ * A third-party block is signed by someone who never saw the rest of the
+ * token, so its indices number only its own symbols and keys. Reading it
+ * against the token-wide tables resolves them to the wrong entries -- which
+ * is silent, because both tables are populated and both indices are in range.
+ * The specification's public-key interning sample is exactly this case, and
+ * it is the reason this function exists. */
+BS_API bs_status bs_tables_build_block(bs_arena *a, bs_span block,
+                                       bs_tables *out) {
+  bs_signed_block one;
+  if (a == NULL || out == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  memset(&one, 0, sizeof one);
+  one.block = block;
+  return bs_tables_collect(a, &one, 1U, 0, out);
 }
 
 /* ---------------------------------------------------------------------------

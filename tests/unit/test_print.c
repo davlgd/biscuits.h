@@ -336,10 +336,19 @@ static void test_term_containers(void) {
   wrap(&t, BS_F_TERM_ARRAY, &list);
   CHECK(print_term(&t, "[\"alpha\", \"beta\"]"));
 
-  /* An empty container. */
+  /* Empty containers. A set prints as `{,}` rather than `{}`: the brace is
+   * shared with maps and the colon is what separates them, so an empty set
+   * and an empty map would otherwise be the same text. The specification's
+   * own sample checks `{,}.length() === 0`. */
   list.n = 0;
   wrap(&t, BS_F_TERM_ARRAY, &list);
   CHECK(print_term(&t, "[]"));
+
+  wrap(&t, BS_F_TERM_SET, &list);
+  CHECK(print_term(&t, "{,}"));
+
+  wrap(&t, BS_F_TERM_MAP, &list);
+  CHECK(print_term(&t, "{}"));
 }
 
 static void test_term_maps(void) {

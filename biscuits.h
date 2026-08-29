@@ -417,6 +417,15 @@ typedef struct bs_tables {
 BS_API BS_MUST_USE bs_status bs_tables_build(bs_arena *a, const bs_token *t,
                                              bs_tables *out);
 
+/* The tables of a single block, standing alone.
+ *
+ * Use these, not the token-wide ones, for a block carrying an external key: a
+ * third-party signer never saw the rest of the token, so its indices number
+ * only its own symbols and keys. Reading such a block against the token-wide
+ * tables silently resolves every index to the wrong entry. */
+BS_API BS_MUST_USE bs_status bs_tables_build_block(bs_arena *a, bs_span block,
+                                                   bs_tables *out);
+
 /* Render one encoded Predicate as `name(term, ...)`. */
 BS_API BS_MUST_USE bs_status bs_predicate_print(bs_writer *w,
                                                 const bs_tables *tab,
@@ -430,6 +439,34 @@ BS_API BS_MUST_USE bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
 /* Render one encoded Scope: `authority`, `previous`, or `<alg>/<hex key>`. */
 BS_API BS_MUST_USE bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
                                             bs_span scope);
+
+/* Render one encoded Expression as Datalog source.
+ *
+ * Needs the arena: reconstructing the tree from the opcode stream costs one
+ * node array and one stack, both sized from the expression's own length. The
+ * alternative -- rendering operands to text and concatenating -- is quadratic
+ * on a long chain of operators, which is a shape an attacker can choose. */
+BS_API BS_MUST_USE bs_status bs_expr_print(bs_writer *w, bs_arena *a,
+                                           const bs_tables *tab, bs_span expr);
+
+/* Render one encoded Rule as `head <- body`. */
+BS_API BS_MUST_USE bs_status bs_rule_print(bs_writer *w, bs_arena *a,
+                                           const bs_tables *tab, bs_span rule);
+
+/* Render one encoded Check: `check if`, `check all`, or `reject if`. */
+BS_API BS_MUST_USE bs_status bs_check_print(bs_writer *w, bs_arena *a,
+                                            const bs_tables *tab,
+                                            bs_span check);
+
+/* Render a whole block as Datalog source: facts, then rules, then checks.
+ *
+ * `block` is the serialized Block message, which is what bs_signed_block
+ * carries. Returns BS_ERR_UNSUPPORTED for a block-level scope: no sample in
+ * the specification carries one, so its printed form cannot be confirmed, and
+ * guessing would produce output that disagrees with every other reader. */
+BS_API BS_MUST_USE bs_status bs_block_print(bs_writer *w, bs_arena *a,
+                                            const bs_tables *tab,
+                                            bs_span block);
 
 /* ===========================================================================
  * 30_impl_open.inc
@@ -1858,7 +1895,16 @@ static void bs_put_open(bs_writer *w, uint32_t kind) {
   bs_put_byte(w, (uint8_t)((kind == BS_CTR_ARRAY) ? '[' : '{'));
 }
 
-static void bs_put_close(bs_writer *w, uint32_t kind) {
+/* An empty set prints as `{,}`, not `{}`.
+ *
+ * Sets and maps share the brace, and the colon is what tells them apart --
+ * which leaves nothing to distinguish an empty one from the other. The text
+ * format resolves it with a lone comma in the set. The specification's own
+ * sample checks `{,}.length() === 0`, so this is required, not cosmetic. */
+static void bs_put_close(bs_writer *w, uint32_t kind, int emitted) {
+  if (kind == BS_CTR_SET && emitted == 0) {
+    bs_put_byte(w, (uint8_t)',');
+  }
   bs_put_byte(w, (uint8_t)((kind == BS_CTR_ARRAY) ? ']' : '}'));
 }
 
@@ -1892,7 +1938,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
     int step;
 
     if (bs_cursor_done(&f->c)) {
-      bs_put_close(w, f->kind);
+      bs_put_close(w, f->kind, f->emitted);
       depth--;
       continue;
     }
@@ -2016,13 +2062,24 @@ static bs_status bs_repeated(bs_span msg, uint32_t field, bs_span *out,
   return BS_OK;
 }
 
-/* Build the token-wide symbol and public-key tables.
+static int bs_pubkey_eq(const bs_public_key *x, const bs_public_key *y) {
+  return x->alg == y->alg && bs_span_eq(x->key, y->key);
+}
+
+/* Collect the symbol and public-key tables from a run of blocks.
  *
- * Both are read-only views over the token's own bytes: the arena holds the
- * two index arrays and nothing else, so a token of any size costs two
- * allocations here rather than one per symbol. */
-BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
-                                 bs_tables *out) {
+ * `skip_external` reproduces the rule in the specification's reference
+ * decoder: a block carrying an external signature contributes nothing to the
+ * token-wide tables. Its symbols and keys belong to the third party that
+ * signed it, who never saw the rest of the token, so folding them in would
+ * shift every index that follows.
+ *
+ * Public keys are deduplicated on insertion -- a key already in the table
+ * keeps its index rather than gaining a second one. Symbols are not: they are
+ * appended as they come. */
+static bs_status bs_tables_collect(bs_arena *a, const bs_signed_block *blocks,
+                                   size_t block_count, int skip_external,
+                                   bs_tables *out) {
   size_t total_symbols = 0;
   size_t total_keys = 0;
   size_t block;
@@ -2033,27 +2090,25 @@ BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
    * the point of use would hide that. */
   bs_span *sym_slots = NULL;
 
-  if (a == NULL || t == NULL || out == NULL || t->blocks == NULL) {
-    return BS_ERR_ARGUMENT;
-  }
-
   out->symbols.entries = NULL;
   out->symbols.count = 0;
   out->public_keys = NULL;
   out->public_key_count = 0;
 
-  for (block = 0; block < t->block_count; block++) {
+  for (block = 0; block < block_count; block++) {
     size_t n;
-    bs_status st =
-        bs_repeated(t->blocks[block].block, BS_F_BLOCK_SYMBOLS, NULL, 0U, &n);
+    bs_status st;
+    if (skip_external && blocks[block].has_external) {
+      continue;
+    }
+    st = bs_repeated(blocks[block].block, BS_F_BLOCK_SYMBOLS, NULL, 0U, &n);
     if (st != BS_OK) {
       return st;
     }
     if (!bs_size_add(total_symbols, n, &total_symbols)) {
       return BS_ERR_OVERFLOW;
     }
-    st = bs_repeated(t->blocks[block].block, BS_F_BLOCK_PUBLIC_KEYS, NULL, 0U,
-                     &n);
+    st = bs_repeated(blocks[block].block, BS_F_BLOCK_PUBLIC_KEYS, NULL, 0U, &n);
     if (st != BS_OK) {
       return st;
     }
@@ -2077,9 +2132,13 @@ BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
     }
   }
 
-  for (block = 0; block < t->block_count; block++) {
-    bs_cursor c = bs_cursor_make(t->blocks[block].block);
+  for (block = 0; block < block_count; block++) {
+    bs_cursor c;
     bs_pb_field f;
+    if (skip_external && blocks[block].has_external) {
+      continue;
+    }
+    c = bs_cursor_make(blocks[block].block);
     while (!bs_cursor_done(&c)) {
       if (!bs_pb_next(&c, &f)) {
         return BS_ERR_MALFORMED;
@@ -2088,27 +2147,77 @@ BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
         continue;
       }
       if (f.number == BS_F_BLOCK_SYMBOLS) {
-        BS_ASSERT(sym_at < total_symbols);
+        /* The counting pass allocated exactly as many slots as this pass will
+         * fill. If the two ever disagree the input changed underneath us,
+         * which cannot happen -- but saying so here is what lets the static
+         * analyser see that the array is non-null and in range. */
+        if (sym_slots == NULL || sym_at >= total_symbols) {
+          return BS_ERR_MALFORMED;
+        }
         sym_slots[sym_at] = f.bytes;
         sym_at++;
       } else if (f.number == BS_F_BLOCK_PUBLIC_KEYS) {
-        bs_status st;
-        BS_ASSERT(key_at < total_keys);
-        st = bs_pb_pubkey(f.bytes, &out->public_keys[key_at]);
+        bs_public_key key;
+        bs_status st = bs_pb_pubkey(f.bytes, &key);
+        size_t seen;
+        int duplicate = 0;
         if (st != BS_OK) {
           return st;
         }
-        key_at++;
+        for (seen = 0; seen < key_at && out->public_keys != NULL; seen++) {
+          if (bs_pubkey_eq(&out->public_keys[seen], &key)) {
+            duplicate = 1;
+            break;
+          }
+        }
+        if (!duplicate) {
+          if (out->public_keys == NULL || key_at >= total_keys) {
+            return BS_ERR_MALFORMED;
+          }
+          out->public_keys[key_at] = key;
+          key_at++;
+        }
       }
     }
   }
 
   BS_ASSERT(sym_at == total_symbols);
-  BS_ASSERT(key_at == total_keys);
+  BS_ASSERT(key_at <= total_keys); /* duplicates were folded away */
   out->symbols.entries = sym_slots;
   out->symbols.count = total_symbols;
   out->public_key_count = total_keys;
   return BS_OK;
+}
+
+/* The token-wide tables: every block's symbols and keys, in block order.
+ *
+ * These are the tables a regular block is read against. A third-party block
+ * is not -- see bs_tables_build_block. */
+BS_API bs_status bs_tables_build(bs_arena *a, const bs_token *t,
+                                 bs_tables *out) {
+  if (a == NULL || t == NULL || out == NULL || t->blocks == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  return bs_tables_collect(a, t->blocks, t->block_count, 1, out);
+}
+
+/* The tables of a single block, standing alone.
+ *
+ * A third-party block is signed by someone who never saw the rest of the
+ * token, so its indices number only its own symbols and keys. Reading it
+ * against the token-wide tables resolves them to the wrong entries -- which
+ * is silent, because both tables are populated and both indices are in range.
+ * The specification's public-key interning sample is exactly this case, and
+ * it is the reason this function exists. */
+BS_API bs_status bs_tables_build_block(bs_arena *a, bs_span block,
+                                       bs_tables *out) {
+  bs_signed_block one;
+  if (a == NULL || out == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  memset(&one, 0, sizeof one);
+  one.block = block;
+  return bs_tables_collect(a, &one, 1U, 0, out);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2261,6 +2370,770 @@ BS_API bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
     return BS_ERR_MALFORMED;
   }
   return bs_predicate_print(w, tab, pred);
+}
+
+/* ===========================================================================
+ * 90_expr.inc
+ * ======================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * Expressions
+ *
+ * Expressions travel as a postfix opcode sequence for a stack machine. Turning
+ * that back into source is the one place in this library where a naive design
+ * is quadratic: rendering each operator by concatenating the text of its
+ * operands copies the accumulated string once per operator, so `1+1+1+...`
+ * costs O(n^2) bytes.
+ *
+ * So it is done in two passes instead. The first replays the stack machine but
+ * pushes *node indices* rather than text, which reconstructs the tree in O(n).
+ * The second walks that tree and writes straight to the output, with an
+ * explicit stack and no intermediate buffers at all.
+ *
+ * Precedence needs no handling: the encoder emits an explicit `Parens` opcode
+ * wherever the source had one, which is exactly why that opcode exists. The
+ * printer therefore never adds a parenthesis and never removes one -- it
+ * reproduces what the writer chose.
+ * ------------------------------------------------------------------------ */
+
+#define BS_F_EXPR_OPS 1U
+
+#define BS_F_OP_VALUE 1U
+#define BS_F_OP_UNARY 2U
+#define BS_F_OP_BINARY 3U
+#define BS_F_OP_CLOSURE 4U
+
+#define BS_F_OPKIND 1U
+#define BS_F_OPFFI 2U
+
+#define BS_F_CLOSURE_PARAMS 1U
+#define BS_F_CLOSURE_OPS 2U
+
+#define BS_U_NEGATE 0U
+#define BS_U_PARENS 1U
+#define BS_U_LENGTH 2U
+#define BS_U_TYPEOF 3U
+#define BS_U_FFI 4U
+
+#define BS_B_FFI 28U
+
+/* How a binary operator is written. The specification defines the opcodes;
+ * this table defines their surface syntax, and every entry is taken from the
+ * conformance samples rather than guessed. */
+#define BS_OP_INFIX 0U
+#define BS_OP_METHOD 1U
+
+typedef struct bs_binop {
+  uint8_t style;
+  const char *text;
+  size_t len;
+} bs_binop;
+
+#define BS_OP(style, lit) {style, lit, sizeof(lit) - 1U}
+
+static const bs_binop BS_BINOPS[] = {
+    BS_OP(BS_OP_INFIX, "<"),             /*  0 LessThan */
+    BS_OP(BS_OP_INFIX, ">"),             /*  1 GreaterThan */
+    BS_OP(BS_OP_INFIX, "<="),            /*  2 LessOrEqual */
+    BS_OP(BS_OP_INFIX, ">="),            /*  3 GreaterOrEqual */
+    BS_OP(BS_OP_INFIX, "==="),           /*  4 Equal */
+    BS_OP(BS_OP_METHOD, "contains"),     /*  5 Contains */
+    BS_OP(BS_OP_METHOD, "starts_with"),  /*  6 Prefix */
+    BS_OP(BS_OP_METHOD, "ends_with"),    /*  7 Suffix */
+    BS_OP(BS_OP_METHOD, "matches"),      /*  8 Regex */
+    BS_OP(BS_OP_INFIX, "+"),             /*  9 Add */
+    BS_OP(BS_OP_INFIX, "-"),             /* 10 Sub */
+    BS_OP(BS_OP_INFIX, "*"),             /* 11 Mul */
+    BS_OP(BS_OP_INFIX, "/"),             /* 12 Div */
+    BS_OP(BS_OP_INFIX, "&&"),            /* 13 And */
+    BS_OP(BS_OP_INFIX, "||"),            /* 14 Or */
+    BS_OP(BS_OP_METHOD, "intersection"), /* 15 Intersection */
+    BS_OP(BS_OP_METHOD, "union"),        /* 16 Union */
+    BS_OP(BS_OP_INFIX, "&"),             /* 17 BitwiseAnd */
+    BS_OP(BS_OP_INFIX, "|"),             /* 18 BitwiseOr */
+    BS_OP(BS_OP_INFIX, "^"),             /* 19 BitwiseXor */
+    BS_OP(BS_OP_INFIX, "!=="),           /* 20 NotEqual */
+    BS_OP(BS_OP_INFIX, "=="),            /* 21 HeterogeneousEqual */
+    BS_OP(BS_OP_INFIX, "!="),            /* 22 HeterogeneousNotEqual */
+    BS_OP(BS_OP_INFIX, "&&"),            /* 23 LazyAnd */
+    BS_OP(BS_OP_INFIX, "||"),            /* 24 LazyOr */
+    BS_OP(BS_OP_METHOD, "all"),          /* 25 All */
+    BS_OP(BS_OP_METHOD, "any"),          /* 26 Any */
+    BS_OP(BS_OP_METHOD, "get"),          /* 27 Get */
+    BS_OP(BS_OP_METHOD, "extern"),       /* 28 Ffi, name supplied separately */
+    BS_OP(BS_OP_METHOD, "try_or"),       /* 29 TryOr */
+};
+
+#define BS_BINOP_COUNT (sizeof BS_BINOPS / sizeof BS_BINOPS[0])
+
+#define BS_E_VALUE 0U
+#define BS_E_UNARY 1U
+#define BS_E_BINARY 2U
+#define BS_E_CLOSURE 3U
+
+#define BS_E_NONE 0xFFFFFFFFU
+
+typedef struct bs_enode {
+  bs_span payload; /* value: the Term bytes; closure: the Closure message */
+  uint64_t ffi;    /* symbol index of an external call's name */
+  uint32_t kind;   /* the unary or binary opcode */
+  uint32_t a;      /* first operand, or BS_E_NONE */
+  uint32_t b;      /* second operand, or BS_E_NONE */
+  uint8_t tag;     /* BS_E_* */
+  uint8_t has_ffi;
+} bs_enode;
+
+/* One frame of the reconstruction: an opcode list being replayed, and the
+ * height of the value stack when it started. */
+typedef struct bs_eframe {
+  bs_cursor ops;
+  bs_span closure; /* the Closure message, for its parameters */
+  size_t base;
+  uint32_t field; /* ops are field 1 of an Expression, field 2 of a Closure */
+  int is_closure;
+} bs_eframe;
+
+/* Read an OpUnary or OpBinary: a kind, and optionally an external name. */
+static bs_status bs_op_kind(bs_span msg, uint32_t *kind, uint64_t *ffi,
+                            uint8_t *has_ffi) {
+  bs_cursor c = bs_cursor_make(msg);
+  bs_pb_field f;
+  int found = 0;
+
+  *has_ffi = 0;
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.wire != BS_PB_VARINT) {
+      continue;
+    }
+    if (f.number == BS_F_OPKIND) {
+      if (found++ || f.varint > 0xFFFFFFFFU) {
+        return BS_ERR_MALFORMED;
+      }
+      *kind = (uint32_t)f.varint;
+    } else if (f.number == BS_F_OPFFI) {
+      *ffi = f.varint;
+      *has_ffi = 1;
+    }
+  }
+  return (found == 1) ? BS_OK : BS_ERR_MALFORMED;
+}
+
+/* Classify one Op. Returns the oneof branch that was present, or an error if
+ * the count is anything but one -- an Op that claims to be two things at once
+ * would let a token mean different things to different readers. */
+static bs_status bs_op_branch(bs_span op, uint32_t *branch, bs_span *body) {
+  bs_cursor c = bs_cursor_make(op);
+  bs_pb_field f;
+  int found = 0;
+
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.wire != BS_PB_BYTES) {
+      continue;
+    }
+    if (f.number == BS_F_OP_VALUE || f.number == BS_F_OP_UNARY ||
+        f.number == BS_F_OP_BINARY || f.number == BS_F_OP_CLOSURE) {
+      if (found++) {
+        return BS_ERR_MALFORMED;
+      }
+      *branch = f.number;
+      *body = f.bytes;
+    }
+  }
+  return (found == 1) ? BS_OK : BS_ERR_MALFORMED;
+}
+
+/* Replay the opcode stream, pushing node indices instead of values. */
+static bs_status bs_expr_build(bs_arena *a, bs_span expr, bs_enode **nodes_out,
+                               uint32_t **stack_out, uint32_t *root,
+                               size_t *node_count) {
+  bs_eframe frames[BS_MAX_DEPTH];
+  bs_enode *nodes;
+  uint32_t *stack;
+  size_t cap;
+  size_t used = 0;
+  size_t sp = 0;
+  size_t depth = 1;
+
+  /* Every Op is a length-delimited field, so it costs at least two bytes in
+   * its parent message. That bounds the node count by half the expression's
+   * length -- an upper bound derived from the input rather than a constant,
+   * which is what keeps a hostile expression's cost proportional to what the
+   * attacker actually sent. */
+  cap = (expr.n / 2U) + 1U;
+  nodes = (bs_enode *)bs_arena_array(a, cap, sizeof(bs_enode), BS_ALIGN_MAX);
+  stack = (uint32_t *)bs_arena_array(a, cap, sizeof(uint32_t), BS_ALIGN_MAX);
+  if (nodes == NULL || stack == NULL) {
+    return BS_ERR_NOMEM;
+  }
+
+  frames[0].ops = bs_cursor_make(expr);
+  frames[0].closure = bs_span_make(NULL, 0);
+  frames[0].base = 0;
+  frames[0].field = BS_F_EXPR_OPS;
+  frames[0].is_closure = 0;
+
+  while (depth > 0U) {
+    bs_eframe *fr = &frames[depth - 1U];
+    bs_pb_field f;
+    bs_span body;
+    uint32_t branch = 0;
+    bs_status st;
+
+    if (bs_cursor_done(&fr->ops)) {
+      if (!fr->is_closure) {
+        depth--;
+        continue;
+      }
+      /* A closure body must leave exactly one value behind, like any
+       * expression. */
+      if (sp != fr->base + 1U) {
+        return BS_ERR_MALFORMED;
+      }
+      if (used >= cap) {
+        return BS_ERR_LIMIT;
+      }
+      nodes[used].tag = (uint8_t)BS_E_CLOSURE;
+      nodes[used].payload = fr->closure;
+      nodes[used].a = stack[fr->base];
+      nodes[used].b = BS_E_NONE;
+      nodes[used].kind = 0;
+      nodes[used].ffi = 0;
+      nodes[used].has_ffi = 0;
+      sp = fr->base;
+      stack[sp++] = (uint32_t)used;
+      used++;
+      depth--;
+      continue;
+    }
+
+    if (!bs_pb_next(&fr->ops, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number != fr->field || f.wire != BS_PB_BYTES) {
+      continue;
+    }
+
+    st = bs_op_branch(f.bytes, &branch, &body);
+    if (st != BS_OK) {
+      return st;
+    }
+    if (used >= cap || sp >= cap) {
+      return BS_ERR_LIMIT;
+    }
+
+    if (branch == BS_F_OP_CLOSURE) {
+      if (depth >= (size_t)BS_MAX_DEPTH) {
+        return BS_ERR_DEPTH;
+      }
+      frames[depth].ops = bs_cursor_make(body);
+      frames[depth].closure = body;
+      frames[depth].base = sp;
+      frames[depth].field = BS_F_CLOSURE_OPS;
+      frames[depth].is_closure = 1;
+      depth++;
+      continue;
+    }
+
+    nodes[used].payload = bs_span_make(NULL, 0);
+    nodes[used].ffi = 0;
+    nodes[used].has_ffi = 0;
+    nodes[used].kind = 0;
+    nodes[used].a = BS_E_NONE;
+    nodes[used].b = BS_E_NONE;
+
+    if (branch == BS_F_OP_VALUE) {
+      nodes[used].tag = (uint8_t)BS_E_VALUE;
+      nodes[used].payload = body;
+    } else if (branch == BS_F_OP_UNARY) {
+      if (sp < fr->base + 1U) {
+        return BS_ERR_MALFORMED; /* not enough operands */
+      }
+      st = bs_op_kind(body, &nodes[used].kind, &nodes[used].ffi,
+                      &nodes[used].has_ffi);
+      if (st != BS_OK) {
+        return st;
+      }
+      nodes[used].tag = (uint8_t)BS_E_UNARY;
+      nodes[used].a = stack[--sp];
+    } else {
+      if (sp < fr->base + 2U) {
+        return BS_ERR_MALFORMED;
+      }
+      st = bs_op_kind(body, &nodes[used].kind, &nodes[used].ffi,
+                      &nodes[used].has_ffi);
+      if (st != BS_OK) {
+        return st;
+      }
+      nodes[used].tag = (uint8_t)BS_E_BINARY;
+      /* The stack machine pushes the left operand first, so the top of the
+       * stack is the right-hand side. */
+      nodes[used].b = stack[--sp];
+      nodes[used].a = stack[--sp];
+    }
+
+    stack[sp++] = (uint32_t)used;
+    used++;
+  }
+
+  /* After the whole stream, exactly one value must remain. */
+  if (sp != 1U) {
+    return BS_ERR_MALFORMED;
+  }
+  *nodes_out = nodes;
+  *stack_out = stack;
+  *root = stack[0];
+  *node_count = used;
+  return BS_OK;
+}
+
+static void bs_put_extern(bs_writer *w, const bs_symbols *sym, uint64_t name,
+                          int *ok) {
+  BS_PUT_LIT(w, ".extern::");
+  bs_put_symbol(w, sym, name, 0, ok);
+  bs_put_byte(w, (uint8_t)'(');
+}
+
+/* Walk the tree and write the source. Two stages per node at most, so the
+ * traversal is a flat loop over an explicit stack. */
+static bs_status bs_expr_emit(bs_writer *w, const bs_tables *tab,
+                              const bs_enode *nodes, size_t node_count,
+                              uint32_t root, uint32_t *stack, size_t cap) {
+  size_t sp = 0;
+  int ok = 1;
+
+  /* The traversal reuses the reconstruction stack, which is no longer needed
+   * and is already sized to the node count. Each entry packs a node index
+   * with a two-bit stage, so the index must fit in the remaining thirty bits.
+   * An expression large enough to break that would have to be a gigabyte of
+   * opcodes; the check costs one comparison and removes the assumption. */
+  if (cap == 0U || node_count > 0x3FFFFFFFU) {
+    return BS_ERR_LIMIT;
+  }
+
+  stack[sp++] = root << 2U;
+
+  while (sp > 0U) {
+    uint32_t packed = stack[sp - 1U];
+    uint32_t index = packed >> 2U;
+    uint32_t st = packed & 3U;
+    const bs_enode *n;
+
+    if (index >= (uint32_t)node_count) {
+      return BS_ERR_MALFORMED;
+    }
+    n = &nodes[index];
+
+    if (n->tag == BS_E_VALUE) {
+      bs_status s = bs_term_print(w, &tab->symbols, n->payload);
+      if (s != BS_OK) {
+        return s;
+      }
+      sp--;
+      continue;
+    }
+
+    if (n->tag == BS_E_UNARY) {
+      if (st == 0U) {
+        if (n->kind == BS_U_NEGATE) {
+          bs_put_byte(w, (uint8_t)'!');
+        } else if (n->kind == BS_U_PARENS) {
+          bs_put_byte(w, (uint8_t)'(');
+        }
+        stack[sp - 1U] = (index << 2U) | 1U;
+        if (sp >= cap) {
+          return BS_ERR_LIMIT;
+        }
+        stack[sp++] = n->a << 2U;
+        continue;
+      }
+      switch (n->kind) {
+      case BS_U_NEGATE:
+        break;
+      case BS_U_PARENS:
+        bs_put_byte(w, (uint8_t)')');
+        break;
+      case BS_U_LENGTH:
+        BS_PUT_LIT(w, ".length()");
+        break;
+      case BS_U_TYPEOF:
+        BS_PUT_LIT(w, ".type()");
+        break;
+      case BS_U_FFI:
+        if (!n->has_ffi) {
+          return BS_ERR_MALFORMED;
+        }
+        bs_put_extern(w, &tab->symbols, n->ffi, &ok);
+        bs_put_byte(w, (uint8_t)')');
+        break;
+      default:
+        return BS_ERR_MALFORMED;
+      }
+      sp--;
+      continue;
+    }
+
+    if (n->tag == BS_E_CLOSURE) {
+      if (st == 0U) {
+        /* Parameters, when there are any. A zero-parameter closure is how the
+         * short-circuiting operators carry their right-hand side, and it is
+         * invisible in the source: `a && b`, not `a && (() -> b)`. */
+        bs_cursor c = bs_cursor_make(n->payload);
+        bs_pb_field f;
+        int emitted = 0;
+        while (!bs_cursor_done(&c)) {
+          if (!bs_pb_next(&c, &f)) {
+            return BS_ERR_MALFORMED;
+          }
+          if (f.number != BS_F_CLOSURE_PARAMS || f.wire != BS_PB_VARINT) {
+            continue;
+          }
+          if (emitted++ > 0) {
+            BS_PUT_LIT(w, ", ");
+          }
+          bs_put_byte(w, (uint8_t)'$');
+          bs_put_symbol(w, &tab->symbols, f.varint, 0, &ok);
+        }
+        if (emitted > 0) {
+          BS_PUT_LIT(w, " -> ");
+        }
+        stack[sp - 1U] = (index << 2U) | 1U;
+        if (sp >= cap) {
+          return BS_ERR_LIMIT;
+        }
+        stack[sp++] = n->a << 2U;
+        continue;
+      }
+      sp--;
+      continue;
+    }
+
+    /* Binary. */
+    if (n->kind >= (uint32_t)BS_BINOP_COUNT) {
+      return BS_ERR_MALFORMED;
+    }
+    if (st == 0U) {
+      stack[sp - 1U] = (index << 2U) | 1U;
+      if (sp >= cap) {
+        return BS_ERR_LIMIT;
+      }
+      stack[sp++] = n->a << 2U;
+      continue;
+    }
+    if (st == 1U) {
+      const bs_binop *op = &BS_BINOPS[n->kind];
+      if (n->kind == BS_B_FFI) {
+        if (!n->has_ffi) {
+          return BS_ERR_MALFORMED;
+        }
+        bs_put_extern(w, &tab->symbols, n->ffi, &ok);
+      } else if (op->style == BS_OP_INFIX) {
+        bs_put_byte(w, (uint8_t)' ');
+        bs_put_span(w, bs_span_make(op->text, op->len));
+        bs_put_byte(w, (uint8_t)' ');
+      } else {
+        bs_put_byte(w, (uint8_t)'.');
+        bs_put_span(w, bs_span_make(op->text, op->len));
+        bs_put_byte(w, (uint8_t)'(');
+      }
+      stack[sp - 1U] = (index << 2U) | 2U;
+      if (sp >= cap) {
+        return BS_ERR_LIMIT;
+      }
+      stack[sp++] = n->b << 2U;
+      continue;
+    }
+
+    if (n->kind == BS_B_FFI || BS_BINOPS[n->kind].style == BS_OP_METHOD) {
+      bs_put_byte(w, (uint8_t)')');
+    }
+    sp--;
+  }
+
+  if (!ok) {
+    return BS_ERR_MALFORMED;
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
+}
+
+/* Render one encoded Expression as Datalog source. */
+BS_API bs_status bs_expr_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
+                               bs_span expr) {
+  bs_enode *nodes = NULL;
+  uint32_t *stack = NULL;
+  uint32_t root = 0;
+  size_t count = 0;
+  bs_status st;
+
+  if (w == NULL || a == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  st = bs_expr_build(a, expr, &nodes, &stack, &root, &count);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_expr_emit(w, tab, nodes, count, root, stack, (expr.n / 2U) + 1U);
+}
+
+/* ===========================================================================
+ * 95_datalog.inc
+ * ======================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * Rules, checks, and whole blocks
+ *
+ * This is where the pieces meet: a rule is a head, a body of predicates, a
+ * list of expressions and the scopes it trusts, and a check is one or more
+ * rules with a kind. The block is those in a fixed order -- facts, then rules,
+ * then checks -- which is the order the reference implementation prints and
+ * therefore the order the conformance suite expects.
+ * ------------------------------------------------------------------------ */
+
+#define BS_F_RULE_HEAD 1U
+#define BS_F_RULE_BODY 2U
+#define BS_F_RULE_EXPRESSIONS 3U
+#define BS_F_RULE_SCOPE 4U
+
+#define BS_F_CHECK_QUERIES 1U
+#define BS_F_CHECK_KIND 2U
+
+#define BS_CHECK_ONE 0U
+#define BS_CHECK_ALL 1U
+#define BS_CHECK_REJECT 2U
+
+/* Render a rule's body: its predicates, then its expressions, comma
+ * separated, then the scopes it trusts.
+ *
+ * A check prints only this part; a rule prints its head and an arrow first.
+ * They are the same message, and which half is shown is the only difference
+ * between the two forms. */
+static bs_status bs_rule_body_print(bs_writer *w, bs_arena *a,
+                                    const bs_tables *tab, bs_span rule) {
+  bs_cursor c;
+  bs_pb_field f;
+  int emitted = 0;
+  int scopes = 0;
+  bs_status st;
+
+  c = bs_cursor_make(rule);
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number != BS_F_RULE_BODY || f.wire != BS_PB_BYTES) {
+      continue;
+    }
+    if (emitted++ > 0) {
+      BS_PUT_LIT(w, ", ");
+    }
+    st = bs_predicate_print(w, tab, f.bytes);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+
+  c = bs_cursor_make(rule);
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number != BS_F_RULE_EXPRESSIONS || f.wire != BS_PB_BYTES) {
+      continue;
+    }
+    if (emitted++ > 0) {
+      BS_PUT_LIT(w, ", ");
+    }
+    st = bs_expr_print(w, a, tab, f.bytes);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+
+  c = bs_cursor_make(rule);
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number != BS_F_RULE_SCOPE || f.wire != BS_PB_BYTES) {
+      continue;
+    }
+    if (scopes++ == 0) {
+      BS_PUT_LIT(w, " trusting ");
+    } else {
+      BS_PUT_LIT(w, ", ");
+    }
+    st = bs_scope_print(w, tab, f.bytes);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+  return BS_OK;
+}
+
+/* `head <- body`. */
+BS_API bs_status bs_rule_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
+                               bs_span rule) {
+  bs_cursor c = bs_cursor_make(rule);
+  bs_pb_field f;
+  bs_span head = bs_span_make(NULL, 0);
+  int found = 0;
+  bs_status st;
+
+  if (w == NULL || a == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number == BS_F_RULE_HEAD && f.wire == BS_PB_BYTES) {
+      if (found++) {
+        return BS_ERR_MALFORMED;
+      }
+      head = f.bytes;
+    }
+  }
+  if (found != 1) {
+    return BS_ERR_MALFORMED;
+  }
+
+  st = bs_predicate_print(w, tab, head);
+  if (st != BS_OK) {
+    return st;
+  }
+  BS_PUT_LIT(w, " <- ");
+  return bs_rule_body_print(w, a, tab, rule);
+}
+
+/* `check if q`, `check all q`, or `reject if q`, with several queries joined
+ * by ` or `. The head of each query is a synthetic predicate the writer never
+ * printed, so it is not printed here either. */
+BS_API bs_status bs_check_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
+                                bs_span check) {
+  bs_cursor c;
+  bs_pb_field f;
+  uint64_t kind = BS_CHECK_ONE;
+  int emitted = 0;
+  bs_status st;
+
+  if (w == NULL || a == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+
+  c = bs_cursor_make(check);
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number == BS_F_CHECK_KIND && f.wire == BS_PB_VARINT) {
+      kind = f.varint;
+    }
+  }
+
+  switch (kind) {
+  case BS_CHECK_ONE:
+    BS_PUT_LIT(w, "check if ");
+    break;
+  case BS_CHECK_ALL:
+    BS_PUT_LIT(w, "check all ");
+    break;
+  case BS_CHECK_REJECT:
+    BS_PUT_LIT(w, "reject if ");
+    break;
+  default:
+    return BS_ERR_MALFORMED;
+  }
+
+  c = bs_cursor_make(check);
+  while (!bs_cursor_done(&c)) {
+    if (!bs_pb_next(&c, &f)) {
+      return BS_ERR_MALFORMED;
+    }
+    if (f.number != BS_F_CHECK_QUERIES || f.wire != BS_PB_BYTES) {
+      continue;
+    }
+    if (emitted++ > 0) {
+      BS_PUT_LIT(w, " or ");
+    }
+    st = bs_rule_body_print(w, a, tab, f.bytes);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+  if (emitted == 0) {
+    return BS_ERR_MALFORMED; /* a check with no query cannot mean anything */
+  }
+  return BS_OK;
+}
+
+/* Render a whole block as Datalog source: facts, then rules, then checks,
+ * each terminated by a semicolon and a newline. That order is not arbitrary --
+ * it is what the reference implementation emits, and the conformance suite
+ * compares text. */
+BS_API bs_status bs_block_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
+                                bs_span block) {
+  static const uint32_t sections[3] = {
+      BS_F_BLOCK_FACTS,
+      BS_F_BLOCK_RULES,
+      BS_F_BLOCK_CHECKS,
+  };
+  size_t i;
+
+  if (w == NULL || a == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+
+  /* A block-level scope would apply to everything in the block. No sample in
+   * the specification's suite carries one, so its printed form cannot be
+   * confirmed against anything -- and inventing a syntax that later turns out
+   * to differ would be worse than refusing. Refused explicitly rather than
+   * ignored: a block whose trust boundary this build cannot render must not
+   * be reported as one it rendered. */
+  {
+    bs_cursor c = bs_cursor_make(block);
+    bs_pb_field f;
+    while (!bs_cursor_done(&c)) {
+      if (!bs_pb_next(&c, &f)) {
+        return BS_ERR_MALFORMED;
+      }
+      if (f.number == BS_F_BLOCK_SCOPE && f.wire == BS_PB_BYTES) {
+        return BS_ERR_UNSUPPORTED;
+      }
+    }
+  }
+
+  for (i = 0; i < 3U; i++) {
+    bs_cursor c = bs_cursor_make(block);
+    bs_pb_field f;
+    while (!bs_cursor_done(&c)) {
+      bs_status st;
+      if (!bs_pb_next(&c, &f)) {
+        return BS_ERR_MALFORMED;
+      }
+      if (f.number != sections[i] || f.wire != BS_PB_BYTES) {
+        continue;
+      }
+      if (sections[i] == BS_F_BLOCK_FACTS) {
+        st = bs_fact_print(w, tab, f.bytes);
+      } else if (sections[i] == BS_F_BLOCK_RULES) {
+        st = bs_rule_print(w, a, tab, f.bytes);
+      } else {
+        st = bs_check_print(w, a, tab, f.bytes);
+      }
+      if (st != BS_OK) {
+        return st;
+      }
+      BS_PUT_LIT(w, ";\n");
+    }
+  }
+
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* ===========================================================================

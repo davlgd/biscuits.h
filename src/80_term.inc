@@ -216,7 +216,16 @@ static void bs_put_open(bs_writer *w, uint32_t kind) {
   bs_put_byte(w, (uint8_t)((kind == BS_CTR_ARRAY) ? '[' : '{'));
 }
 
-static void bs_put_close(bs_writer *w, uint32_t kind) {
+/* An empty set prints as `{,}`, not `{}`.
+ *
+ * Sets and maps share the brace, and the colon is what tells them apart --
+ * which leaves nothing to distinguish an empty one from the other. The text
+ * format resolves it with a lone comma in the set. The specification's own
+ * sample checks `{,}.length() === 0`, so this is required, not cosmetic. */
+static void bs_put_close(bs_writer *w, uint32_t kind, int emitted) {
+  if (kind == BS_CTR_SET && emitted == 0) {
+    bs_put_byte(w, (uint8_t)',');
+  }
   bs_put_byte(w, (uint8_t)((kind == BS_CTR_ARRAY) ? ']' : '}'));
 }
 
@@ -250,7 +259,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
     int step;
 
     if (bs_cursor_done(&f->c)) {
-      bs_put_close(w, f->kind);
+      bs_put_close(w, f->kind, f->emitted);
       depth--;
       continue;
     }

@@ -271,6 +271,15 @@ typedef struct bs_tables {
 BS_API BS_MUST_USE bs_status bs_tables_build(bs_arena *a, const bs_token *t,
                                              bs_tables *out);
 
+/* The tables of a single block, standing alone.
+ *
+ * Use these, not the token-wide ones, for a block carrying an external key: a
+ * third-party signer never saw the rest of the token, so its indices number
+ * only its own symbols and keys. Reading such a block against the token-wide
+ * tables silently resolves every index to the wrong entry. */
+BS_API BS_MUST_USE bs_status bs_tables_build_block(bs_arena *a, bs_span block,
+                                                   bs_tables *out);
+
 /* Render one encoded Predicate as `name(term, ...)`. */
 BS_API BS_MUST_USE bs_status bs_predicate_print(bs_writer *w,
                                                 const bs_tables *tab,
@@ -284,3 +293,31 @@ BS_API BS_MUST_USE bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
 /* Render one encoded Scope: `authority`, `previous`, or `<alg>/<hex key>`. */
 BS_API BS_MUST_USE bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
                                             bs_span scope);
+
+/* Render one encoded Expression as Datalog source.
+ *
+ * Needs the arena: reconstructing the tree from the opcode stream costs one
+ * node array and one stack, both sized from the expression's own length. The
+ * alternative -- rendering operands to text and concatenating -- is quadratic
+ * on a long chain of operators, which is a shape an attacker can choose. */
+BS_API BS_MUST_USE bs_status bs_expr_print(bs_writer *w, bs_arena *a,
+                                           const bs_tables *tab, bs_span expr);
+
+/* Render one encoded Rule as `head <- body`. */
+BS_API BS_MUST_USE bs_status bs_rule_print(bs_writer *w, bs_arena *a,
+                                           const bs_tables *tab, bs_span rule);
+
+/* Render one encoded Check: `check if`, `check all`, or `reject if`. */
+BS_API BS_MUST_USE bs_status bs_check_print(bs_writer *w, bs_arena *a,
+                                            const bs_tables *tab,
+                                            bs_span check);
+
+/* Render a whole block as Datalog source: facts, then rules, then checks.
+ *
+ * `block` is the serialized Block message, which is what bs_signed_block
+ * carries. Returns BS_ERR_UNSUPPORTED for a block-level scope: no sample in
+ * the specification carries one, so its printed form cannot be confirmed, and
+ * guessing would produce output that disagrees with every other reader. */
+BS_API BS_MUST_USE bs_status bs_block_print(bs_writer *w, bs_arena *a,
+                                            const bs_tables *tab,
+                                            bs_span block);

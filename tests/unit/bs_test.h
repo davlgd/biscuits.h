@@ -36,8 +36,9 @@ static void bs_test_report(int ok, const char *expr, const char *file,
  * in the test itself. REQUIRE reports and returns. */
 #define REQUIRE(expr)                                                          \
   do {                                                                         \
-    if (!(expr)) {                                                             \
-      bs_test_report(0, #expr, __FILE__, __LINE__);                            \
+    int bs_ok_ = (expr) ? 1 : 0;                                               \
+    bs_test_report(bs_ok_, #expr, __FILE__, __LINE__);                         \
+    if (!bs_ok_) {                                                             \
       return;                                                                  \
     }                                                                          \
   } while (0)

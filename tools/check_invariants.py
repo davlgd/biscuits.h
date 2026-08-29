@@ -186,9 +186,19 @@ def check_recursion(cc: str, header: pathlib.Path, tmp: pathlib.Path) -> list:
 
 
 def check_pointer_sites(src_dir: pathlib.Path) -> list:
-    """Invariant 4, pinned rather than inferred."""
+    """Invariant 4, pinned rather than inferred.
+
+    This one is a heuristic and says so: it matches the shapes pointer
+    arithmetic actually takes in this codebase -- arithmetic or indexing
+    through a span's `p`, and the arena advancing its `base` -- rather than
+    attempting to understand C. Its first version matched `fr->base + 1U`,
+    which is integer arithmetic on a struct field, and reported three
+    findings that were not real. A gate that cries wolf is a gate people
+    switch off, so the pattern is narrow on purpose; the safety net underneath
+    it is the sanitizer and fuzz coverage, not this.
+    """
     func_re = re.compile(r"^(?:static |BS_API )[A-Za-z_][^;]*\b([a-z_0-9]+)\(")
-    arith_re = re.compile(r"(?:\bp\s*\+|\bbase\s*\+|\.p\[|->p\[|\bp\[)")
+    arith_re = re.compile(r"(?:[.>]p\s*[+\[]|a->base\s*\+|\bbase\s*\+=)")
     problems, current = [], None
     for path in sorted(src_dir.glob("*.inc")):
         for n, line in enumerate(path.read_text().splitlines(), 1):
