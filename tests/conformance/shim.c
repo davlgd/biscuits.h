@@ -1,0 +1,108 @@
+/* Conformance shim for biscuits.h.
+ *
+ * Speaks the protocol in README.md so tests/conformance/run.py can score this
+ * implementation against the official specification samples. This is a test
+ * tool, not part of the library: it may use stdio and it may allocate on the
+ * stack freely. The library it exercises does neither.
+ *
+ * Capabilities are declared, not assumed. The runner skips any tier this shim
+ * does not claim, so the suite gives a useful signal from the first day rather
+ * than a flat zero until the last.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define BISCUITS_IMPLEMENTATION
+#include "biscuits.h"
+
+/* Grows as the library does. Each name here is a promise the runner will
+ * hold us to; adding one before it works turns a skip into a failure. */
+static const char *const CAPABILITIES[] = {NULL};
+
+/* The arena for one token. Sized generously for a test tool; the point of the
+ * peak reporting is to learn what a real deployment would need. */
+static uint8_t g_arena_buf[256 * 1024];
+
+static void emit_capabilities(void) {
+  size_t i;
+  (void)printf("{\"capabilities\":[");
+  for (i = 0; CAPABILITIES[i] != NULL; i++) {
+    (void)printf("%s\"%s\"", (i > 0) ? "," : "", CAPABILITIES[i]);
+  }
+  (void)printf("]}\n");
+}
+
+static int read_file(const char *path, uint8_t *buf, size_t cap, size_t *len) {
+  FILE *f = fopen(path, "rb");
+  size_t n;
+  if (f == NULL) {
+    return 0;
+  }
+  n = fread(buf, 1, cap, f);
+  /* A token that exactly fills the buffer is indistinguishable from one that
+   * was truncated, so refuse both rather than silently testing the wrong
+   * bytes. */
+  if (!feof(f) || ferror(f)) {
+    (void)fclose(f);
+    return 0;
+  }
+  (void)fclose(f);
+  *len = n;
+  return 1;
+}
+
+static void emit_unimplemented(const char *reason) {
+  (void)printf("{\"decode\":{\"error\":\"%s\"}}\n", reason);
+}
+
+int main(int argc, char **argv) {
+  static uint8_t token_buf[1024 * 1024];
+  const char *token_path = NULL;
+  size_t token_len = 0;
+  bs_arena arena;
+  int i;
+
+  for (i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--capabilities") == 0) {
+      emit_capabilities();
+      return 0;
+    }
+    if (strcmp(argv[i], "--version") == 0) {
+      (void)printf("biscuits.h %s\n", BS_VERSION_STRING);
+      return 0;
+    }
+    if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
+      token_path = argv[++i];
+    } else if (strcmp(argv[i], "--root-key") == 0 && i + 1 < argc) {
+      i++; /* consumed once signature verification exists */
+    } else if (strcmp(argv[i], "--authorizer-stdin") == 0) {
+      /* Drain stdin so the runner never blocks writing to a full pipe. */
+      int ch;
+      do {
+        ch = getchar();
+      } while (ch != EOF);
+    }
+  }
+
+  if (token_path == NULL) {
+    (void)fprintf(stderr, "usage: shim --token FILE --root-key HEX "
+                          "[--authorizer-stdin] | --capabilities\n");
+    return 2;
+  }
+  if (!read_file(token_path, token_buf, sizeof token_buf, &token_len)) {
+    (void)fprintf(stderr, "shim: cannot read %s\n", token_path);
+    return 2;
+  }
+
+  if (bs_arena_init(&arena, g_arena_buf, sizeof g_arena_buf) != BS_OK) {
+    (void)fprintf(stderr, "shim: arena init failed\n");
+    return 2;
+  }
+
+  /* Everything below this line is the work still to do. The token bytes are
+   * loaded and the arena is ready; what is missing is the decoder. */
+  emit_unimplemented("decoder not implemented");
+  return 0;
+}

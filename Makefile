@@ -78,6 +78,10 @@ HEADER      := biscuits.h
 SRC_PARTS   := $(shell $(PYTHON) tools/amalgamate.py --list 2>/dev/null)
 UNIT_SRCS   := $(wildcard tests/unit/*.c)
 UNIT_BINS   := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRCS))
+SHIM_SRC    := tests/conformance/shim.c
+# Everything written by hand, for the formatters and linters. The generated
+# header is covered through the fragments it is built from.
+ALL_C       := $(UNIT_SRCS) $(SHIM_SRC)
 
 .PHONY: all
 all: $(HEADER) test
@@ -104,7 +108,7 @@ check-amalgamation:
 # Tests
 # ---------------------------------------------------------------------------
 .PHONY: test
-test: unit
+test: unit conformance
 
 .PHONY: unit
 unit: $(UNIT_BINS)
@@ -117,6 +121,19 @@ $(BUILD)/unit_%: tests/unit/%.c $(HEADER) | $(BUILD)
 
 $(BUILD):
 	@mkdir -p $(BUILD)
+
+# ---------------------------------------------------------------------------
+# Conformance
+# ---------------------------------------------------------------------------
+# The official suite, driven through a shim. See tests/conformance/README.md.
+CONFORMANCE_SHIM := $(BUILD)/conformance_shim
+
+$(CONFORMANCE_SHIM): $(SHIM_SRC) $(HEADER) | $(BUILD)
+	@$(CC) $(CFLAGS_DEBUG) $< -o $@
+
+.PHONY: conformance
+conformance: $(CONFORMANCE_SHIM)
+	@$(PYTHON) tests/conformance/run.py --shim $(CONFORMANCE_SHIM)
 
 # ---------------------------------------------------------------------------
 # Sanitizers
@@ -148,7 +165,7 @@ endif
 # ---------------------------------------------------------------------------
 .PHONY: tidy
 tidy: $(HEADER)
-	@$(CLANG_TIDY) --quiet $(UNIT_SRCS) -- $(CFLAGS_COMMON)
+	@$(CLANG_TIDY) --quiet $(ALL_C) -- $(CFLAGS_COMMON)
 
 .PHONY: cppcheck
 cppcheck: $(HEADER)
@@ -161,19 +178,22 @@ cppcheck: $(HEADER)
 	    $(INCLUDE) src tests
 
 .PHONY: analyze
-analyze: $(HEADER)
-	@$(SCAN_BUILD) --status-bugs $(CC) $(CFLAGS_DEBUG) -c $(UNIT_SRCS) -o /dev/null
+analyze: $(HEADER) | $(BUILD)
+	@for f in $(ALL_C); do \
+	    $(SCAN_BUILD) --status-bugs $(CC) $(CFLAGS_DEBUG) \
+	        -c $$f -o $(BUILD)/$$(basename $$f .c).analyze.o || exit 1; \
+	done
 
 .PHONY: lint
 lint: check-amalgamation format-check tidy cppcheck
 
 .PHONY: format
 format:
-	@$(LLVM_BIN)clang-format -i src/*.inc tests/unit/*.c
+	@$(LLVM_BIN)clang-format -i src/*.inc $(ALL_C)
 
 .PHONY: format-check
 format-check:
-	@$(LLVM_BIN)clang-format --dry-run --Werror src/*.inc tests/unit/*.c
+	@$(LLVM_BIN)clang-format --dry-run --Werror src/*.inc $(ALL_C)
 
 # ---------------------------------------------------------------------------
 # Size report -- the headline number, so it is measured, not estimated.
