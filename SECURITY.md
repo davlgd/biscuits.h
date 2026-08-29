@@ -51,7 +51,7 @@ vectors from RFC 8032 itself would have caught it, because RFC 8032's vectors
 do not include malleated signatures.
 
 **A stack figure that was never measured.** This documentation claimed the
-library ran in 4 KB of stack. The measured worst case is 6 592 bytes. The
+library ran in 4 KB of stack. The measured worst case is 6 864 bytes. The
 figure had been written from intuition; there is now a `make stack` target
 that computes it from the compiler's own frame sizes, and CI fails if it
 grows.
@@ -110,7 +110,7 @@ Claims without a number in this table are not yet claims.
 | Specification conformance | 36 of the 38 official sample tokens | decode 48/48, revocation ids 43/43, signatures 47/47, blocks 43/43; authorization not started |
 | Ed25519 against RFC 8032 vectors | `make unit`, positive and rejection cases | passing |
 | Signature malleability rejected | non-canonical scalars (S >= L) and small-order public keys refused, matching the reference's strict verification | passing, after a defect |
-| Worst-case stack bounded | `make stack` — compiler frame sizes over the call graph, exact because there is no recursion | 6 592 bytes, gated at 8 KB |
+| Worst-case stack bounded | `make stack` — compiler frame sizes over the call graph, exact because there is no recursion | 6 864 bytes, gated at 8 KB |
 | Ed25519 against Project Wycheproof | malleability and low-order points | not started |
 | Builds without bundled crypto | `make unbundled` | passing |
 

@@ -62,17 +62,25 @@ At `-O2` with clang on arm64, today:
 
 | Entry point | Deepest path |
 |---|---|
-| `bs_token_verify` | **6 592 bytes** |
+| `bs_world_run` | **6 864 bytes** |
+| `bs_token_verify` | 6 592 bytes |
 | `bs_block_print` | 2 752 bytes |
+| `bs_world_parse` | 2 240 bytes |
 
 An earlier version of this document claimed 4 KB. That figure was never
-measured and was wrong; the vendored curve arithmetic alone accounts for more
-than half of the real number, with `bs_na_add` at 1 728 bytes and
-`bs_ed25519_verify_parts` at 2 128. Defining `BISCUITS_NO_BUNDLED_CRYPTO`
-removes that path entirely and leaves the printer's 2 752 bytes as the worst
-case.
+measured and was wrong; on the verification path the vendored curve arithmetic
+alone accounts for more than half of the real number, with `bs_na_add` at
+1 728 bytes and `bs_ed25519_verify_parts` at 2 128. Defining
+`BISCUITS_NO_BUNDLED_CRYPTO` removes that path, but not the worst case:
+evaluation is deeper than verification.
 
-`make stack` fails above 8 KB, so growth is visible rather than discovered.
+`make stack` fails above 8 KB, so growth is visible rather than discovered,
+and it has caught growth twice. The regex engine first held its thread lists
+as locals and pushed the total to 8 896 bytes; they moved to the arena. The
+text parser first held its term buffers the same way and reached 8 368; they
+moved too, which is why `bs_world_parse` now sits at 2 240. In both cases the
+tool objected before the commit, which is the only reason these are
+paragraphs rather than incidents.
 
 ### 3. Bounded loops
 

@@ -134,7 +134,8 @@ static void bs_lex_skip(bs_lexer *l) {
  * Only the UTC form the printer emits is accepted. Offsets would need a
  * timezone conversion, and a library that never links a time function has no
  * business inventing one. */
-static bs_status bs_lex_date(bs_lexer *l, size_t start, uint64_t *out) {
+static bs_status bs_lex_date(const bs_lexer *l, size_t start, uint64_t *out,
+                             size_t *end) {
   uint64_t part[6];
   size_t widths[6];
   size_t k;
@@ -200,12 +201,13 @@ static bs_status bs_lex_date(bs_lexer *l, size_t start, uint64_t *out) {
   m = part[1];
   y -= (m <= 2U) ? 1U : 0U;
   era = y / 400U;
-  yoe = y - era * 400U;
-  doy = (153U * ((m > 2U) ? (m - 3U) : (m + 9U)) + 2U) / 5U + part[2] - 1U;
-  days = era * 146097U + (yoe * 365U + yoe / 4U - yoe / 100U) + doy;
+  yoe = y - (era * 400U);
+  doy = (((153U * ((m > 2U) ? (m - 3U) : (m + 9U))) + 2U) / 5U) + part[2] - 1U;
+  days = (era * 146097U) + ((yoe * 365U) + (yoe / 4U) - (yoe / 100U)) + doy;
   days -= 719468U;
 
-  *out = days * 86400U + part[3] * 3600U + part[4] * 60U + part[5];
+  *out = (days * 86400U) + (part[3] * 3600U) + (part[4] * 60U) + part[5];
+  *end = p;
   return BS_OK;
 }
 
@@ -280,22 +282,28 @@ static bs_status bs_lex_next(bs_lexer *l, bs_token_t *t) {
     if (!negative) {
       uint8_t sep = 0;
       if (bs_span_at(l->src, l->pos + 4U, &sep) && sep == (uint8_t)'-') {
-        bs_status st = bs_lex_date(l, l->pos, &t->date);
+        size_t end = l->pos;
+        bs_status st = bs_lex_date(l, l->pos, &t->date, &end);
         if (st == BS_OK) {
           t->kind = (uint8_t)BS_TK_DATE;
-          /* bs_lex_date walked the source without advancing the cursor. */
-          l->pos += 20U;
+          /* bs_lex_date reads without advancing, and reports where it
+           * stopped: the length of a date is its business, not the caller's,
+           * and two places agreeing on 20 is one place too many. */
+          l->pos = end;
           return BS_OK;
         }
       }
     }
 
     while (bs_span_at(l->src, probe, &c) && bs_is_digit(c)) {
-      uint64_t next = value * 10U + (uint64_t)(c - (uint8_t)'0');
-      if (next < value) {
+      uint64_t digit = (uint64_t)(c - (uint8_t)'0');
+      /* Checked before the multiply rather than after. Comparing the product
+       * against what it came from catches most wraps and not all of them,
+       * and "most" is not a bound. */
+      if (value > (UINT64_MAX - digit) / 10U) {
         return BS_ERR_OVERFLOW;
       }
-      value = next;
+      value = (value * 10U) + digit;
       probe++;
       digits++;
     }

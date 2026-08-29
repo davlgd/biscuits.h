@@ -694,5 +694,19 @@ BS_API BS_MUST_USE bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms,
  * Bounded by iterations rather than by time, as the specification's own run
  * limits are: a token cannot buy itself an unbounded evaluation, and reaching
  * the bound is BS_ERR_LIMIT rather than a hang. Pass 0 for the default. */
+/* Parse Datalog source into the world.
+ *
+ * `block` is which block the statements belong to, or BS_MAX_BLOCKS for the
+ * authorizer, which sits outside the chain: it trusts the authority and
+ * itself, and its facts carry BS_ORIGIN_AUTHORIZER.
+ *
+ * `token` and `tables` are needed only to resolve a `trusting ed25519/...`
+ * annotation to the blocks that key signed; both may be NULL when the source
+ * names no public key. */
+BS_API BS_MUST_USE bs_status bs_world_parse(bs_world *w, bs_symtab *syms,
+                                            bs_arena *a, bs_span source,
+                                            size_t block, const bs_token *token,
+                                            const bs_tables *tab);
+
 BS_API BS_MUST_USE bs_status bs_world_run(bs_world *w, bs_symtab *syms,
                                           bs_arena *a, size_t max_iterations);

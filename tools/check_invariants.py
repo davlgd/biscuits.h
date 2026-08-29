@@ -89,8 +89,8 @@ POINTER_ARITHMETIC_SITES = {
     "bs_re_class",
     "bs_re_tokenise",
     "bs_re_search",
-    # The parser reads hex digit pairs out of a literal.
-    "bs_p_term",
+    # The parser packs hex digit pairs out of a literal.
+    "bs_p_unhex",
 }
 
 

@@ -45,6 +45,8 @@ PARTS = [
     "125_regex.inc",
     "120_eval.inc",
     "130_engine.inc",
+    "135_lex.inc",
+    "140_parse.inc",
     "99_epilogue.inc",
 ]
 
