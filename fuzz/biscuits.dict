@@ -1,0 +1,64 @@
+# libFuzzer dictionary for Biscuit tokens.
+#
+# Protobuf is a tag-length-value format, and a mutation that lands a valid tag
+# byte is worth far more than one that lands a random byte: without these the
+# fuzzer spends most of its budget producing inputs the decoder rejects in its
+# first comparison. Each entry is a wire tag, field number shifted left three
+# with the wire type in the low bits.
+
+# Biscuit: rootKeyId(1,varint) authority(2,bytes) blocks(3,bytes) proof(4,bytes)
+biscuit_root_key_id="\x08"
+biscuit_authority="\x12"
+biscuit_blocks="\x1a"
+biscuit_proof="\x22"
+
+# SignedBlock: block(1) nextKey(2) signature(3) externalSignature(4) version(5)
+signed_block="\x0a"
+signed_next_key="\x12"
+signed_signature="\x1a"
+signed_external_sig="\x22"
+signed_version="\x28"
+
+# PublicKey: algorithm(1,varint) key(2,bytes)
+pubkey_algorithm="\x08"
+pubkey_key="\x12"
+pubkey_ed25519="\x08\x00"
+pubkey_secp256r1="\x08\x01"
+
+# Proof: nextSecret(1) finalSignature(2)
+proof_next_secret="\x0a"
+proof_final_signature="\x12"
+
+# Block: symbols(1) context(2) version(3) facts(4) rules(5) checks(6)
+#        scope(7) publicKeys(8)
+block_symbols="\x0a"
+block_context="\x12"
+block_version="\x18"
+block_facts="\x22"
+block_rules="\x2a"
+block_checks="\x32"
+block_scope="\x3a"
+block_public_keys="\x42"
+
+# Term: variable(1) integer(2) string(3) date(4) bytes(5) bool(6) set(7)
+#       null(8) array(9) map(10)
+term_variable="\x08"
+term_integer="\x10"
+term_string="\x18"
+term_date="\x20"
+term_bytes="\x2a"
+term_bool="\x30"
+term_set="\x3a"
+term_null="\x42"
+term_array="\x4a"
+term_map="\x52"
+
+# Op: value(1) unary(2) binary(3) closure(4)
+op_value="\x0a"
+op_unary="\x12"
+op_binary="\x1a"
+op_closure="\x22"
+
+# The lengths that matter: an Ed25519 key and a signature.
+len_32="\x20"
+len_64="\x40"

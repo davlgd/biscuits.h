@@ -94,6 +94,11 @@ evidence rather than assertion: sanitizers on every commit, continuous
 fuzzing, and bounded model checking of the wire decoder, which is the only
 code that ever touches attacker-controlled bytes.
 
+Three libFuzzer targets cover the decoder, the printers and the signature
+chain, seeded with the specification's own sample tokens and run on every
+commit. `BS_ASSERT` compiles in for those builds, so the fuzzer hunts violated
+invariants rather than only crashes — see [`fuzz/README.md`](fuzz/README.md).
+
 [`SECURITY.md`](SECURITY.md) carries the current numbers. Read it before
 trusting this with anything.
 
@@ -180,6 +185,7 @@ make unbundled   # build without the bundled Ed25519, against your own
 make asan        # AddressSanitizer + UndefinedBehaviorSanitizer
 make lint        # amalgamation, format, clang-tidy, cppcheck, invariants
 make analyze     # clang static analyzer
+make fuzz-smoke  # a short seeded run of every fuzz target
 make metrics     # regenerate the size figures in this file
 ```
 

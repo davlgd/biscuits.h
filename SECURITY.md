@@ -3,8 +3,7 @@
 ## Status: do not use this yet
 
 This library is under initial development. It verifies signature chains but
-cannot yet authorize anything, and it has never been fuzzed. Nothing here
-should be relied on for anything.
+cannot yet authorize anything. Nothing here should be relied on for anything.
 
 It has had one adversarial review, which found a misaligned-pointer defect in
 the arena, a specification rule the decoder did not enforce, and several claims
@@ -66,7 +65,8 @@ Claims without a number in this table are not yet claims.
 | Portable arithmetic path exercised | `make portable` — full suite with `BS_NO_OVERFLOW_BUILTINS` | passing |
 | Static analysis clean | clang-tidy (all checks as errors), cppcheck, scan-build | passing |
 | CodeQL | weekly and on change | configured, but dormant: code scanning needs Advanced Security while this repository is private |
-| Continuous fuzzing | libFuzzer targets, OSS-Fuzz | not started |
+| Fuzzing as a regression gate | `make fuzz-smoke` — three libFuzzer targets, seeded with the specification samples, on every commit | passing |
+| Continuous fuzzing | OSS-Fuzz | not started — needs a public repository, and a short run per commit is not a substitute |
 | Differential fuzzing vs `biscuit-rust` | Same input, both implementations, verdicts compared | not started |
 | Wire decoder bounded model checking | CBMC over the protobuf and base64 decoders | not started |
 | Constant-time secret handling | Valgrind/TIMECOP technique on the Linux job | not started |

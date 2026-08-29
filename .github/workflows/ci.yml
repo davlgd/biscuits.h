@@ -83,6 +83,33 @@ jobs:
         env:
           CLANG: clang
 
+  # A short seeded run of every fuzz target. This is a regression gate, not a
+  # security argument -- that needs continuous fuzzing, which needs OSS-Fuzz --
+  # but a crash reachable from a specification sample should never be committed.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - run: make fuzz-smoke FUZZ_SECONDS=45
+        env:
+          CLANG: clang
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
   lint:
     runs-on: ubuntu-latest
     steps:

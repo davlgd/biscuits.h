@@ -93,9 +93,12 @@ SRC_PARTS   := $(shell $(PYTHON) tools/amalgamate.py --list 2>/dev/null)
 UNIT_SRCS   := $(wildcard tests/unit/*.c)
 UNIT_BINS   := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRCS))
 SHIM_SRC    := tests/conformance/shim.c
+FUZZ_SRCS   := $(wildcard fuzz/*.c)
+FUZZ_BINS   := $(patsubst fuzz/%.c,$(BUILD)/%,$(FUZZ_SRCS))
 # Everything written by hand, for the formatters and linters. The generated
 # header is covered through the fragments it is built from.
-ALL_C       := $(UNIT_SRCS) $(SHIM_SRC) tests/build/no_bundled_crypto.c
+ALL_C       := $(UNIT_SRCS) $(SHIM_SRC) tests/build/no_bundled_crypto.c \
+               $(FUZZ_SRCS)
 
 .PHONY: all
 all: $(HEADER) test invariants
@@ -194,6 +197,46 @@ portable: $(HEADER) | $(BUILD)
 	    b=$(BUILD)/portable_$$(basename $$s .c); \
 	    $(CC) $(CFLAGS_DEBUG) -DBS_NO_OVERFLOW_BUILTINS $$s -o $$b || exit 1; \
 	    ./$$b >/dev/null || fail=1; \
+	done; exit $$fail
+
+# ---------------------------------------------------------------------------
+# Fuzzing
+# ---------------------------------------------------------------------------
+# libFuzzer, with the sanitizers on and BS_ASSERT compiled in, so the fuzzer
+# hunts violated invariants and not only crashes.
+#
+# The seed corpus is the specification's own sample tokens. Starting from
+# valid, signed tokens is what gets the fuzzer past the signature check and
+# into the Datalog; starting from random bytes would spend the whole budget
+# in the first hundred lines of the decoder.
+CFLAGS_FUZZ := $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer \
+               -fno-sanitize-recover=all \
+               -fsanitize=fuzzer,address,undefined
+CORPUS := $(BUILD)/corpus
+SAMPLES := vendor/biscuit-spec/samples/current
+
+$(BUILD)/fuzz_%: fuzz/fuzz_%.c $(HEADER) | $(BUILD)
+	@$(CLANG) $(CFLAGS_FUZZ) -Ifuzz $< -o $@
+
+.PHONY: fuzz
+fuzz: $(FUZZ_BINS)
+
+$(CORPUS): | $(BUILD)
+	@mkdir -p $(CORPUS)
+	@cp $(SAMPLES)/*.bc $(CORPUS)/ 2>/dev/null || true
+
+# A short run of every target, seeded, as a regression gate. Not a substitute
+# for continuous fuzzing -- that is what OSS-Fuzz is for -- but enough that a
+# crash reachable from a sample token cannot be committed.
+FUZZ_SECONDS ?= 20
+
+.PHONY: fuzz-smoke
+fuzz-smoke: fuzz $(CORPUS)
+	@fail=0; for b in $(FUZZ_BINS); do \
+	    printf "  FUZZ  %-24s " "$$(basename $$b)"; \
+	    if $$b $(CORPUS) -dict=fuzz/biscuits.dict -max_total_time=$(FUZZ_SECONDS) \
+	         -print_final_stats=0 -detect_leaks=0 >$(BUILD)/$$(basename $$b).log 2>&1; \
+	    then echo "ok"; else echo "CRASH"; tail -30 $(BUILD)/$$(basename $$b).log; fail=1; fi; \
 	done; exit $$fail
 
 # ---------------------------------------------------------------------------
