@@ -700,6 +700,187 @@ static void test_load_reports_pool_exhaustion(void) {
                             (size_t)BS_MAX_BLOCKS) == BS_ERR_LIMIT);
 }
 
+/* --------------------------------------------------------------------------
+ * Scopes
+ * ----------------------------------------------------------------------- */
+
+/* A Block message carrying one rule with the given scope annotations. */
+static void put_rule_block(buf *w, const buf *scopes) {
+  buf head;
+  buf rule;
+  size_t i;
+  head.n = 0;
+  put_tag(&head, BS_F_PREDICATE_NAME, BS_PB_VARINT);
+  put_varint(&head, 27U); /* the well-known "query" */
+  rule.n = 0;
+  put_bytes(&rule, BS_F_RULE_HEAD, head.b, head.n);
+  for (i = 0; i < scopes->n; i++) {
+    put(&rule, scopes->b[i]);
+  }
+  w->n = 0;
+  put_bytes(w, BS_F_BLOCK_RULES, rule.b, rule.n);
+}
+
+static void put_scope_kind(buf *w, uint64_t kind) {
+  buf s;
+  s.n = 0;
+  put_tag(&s, BS_F_SCOPE_TYPE, BS_PB_VARINT);
+  put_varint(&s, kind);
+  put_bytes(w, BS_F_RULE_SCOPE, s.b, s.n);
+}
+
+static bs_status trust_of(const buf *block, size_t block_index,
+                          const bs_token *tok, const bs_tables *tab,
+                          bs_origin *out) {
+  /* All locals: a static bs_world would outlive the caller's tables and hold
+   * a dangling pointer to them. Only the arena's storage is static, and that
+   * is a plain byte buffer with no references into anything. */
+  bs_arena a;
+  bs_world w;
+  bs_symtab syms;
+  bs_limits lim = modest_limits();
+  bs_status st;
+
+  st = bs_arena_init(&a, load_buf, sizeof load_buf);
+  if (st != BS_OK) {
+    return st;
+  }
+  st = bs_symtab_init(&syms, &a, &tab->symbols, 32U);
+  if (st != BS_OK) {
+    return st;
+  }
+  st = bs_world_init(&w, &a, tab, tok->block_count, &lim);
+  if (st != BS_OK) {
+    return st;
+  }
+  st = bs_world_load_logic(&w, &syms, &tab->symbols, tok, tab, span_of(block),
+                           block_index);
+  if (st != BS_OK) {
+    return st;
+  }
+  if (w.rule_count != 1U) {
+    return BS_ERR_MALFORMED;
+  }
+  *out = w.rules[0].trust;
+  return BS_OK;
+}
+
+static void test_scope_resolution(void) {
+  bs_token tok;
+  bs_signed_block blocks[4];
+  bs_tables tab;
+  buf scopes;
+  buf block;
+  bs_origin trust = 0;
+
+  /* Four blocks, two of which carry the same external key. */
+  memset(blocks, 0, sizeof blocks);
+  blocks[2].has_external = 1;
+  blocks[2].external_key.alg = BS_ALG_ED25519;
+  blocks[2].external_key.key = bs_span_make("KEYA", 4U);
+  blocks[3].has_external = 1;
+  blocks[3].external_key.alg = BS_ALG_ED25519;
+  blocks[3].external_key.key = bs_span_make("KEYA", 4U);
+  tok.blocks = blocks;
+  tok.block_count = 4U;
+
+  {
+    static bs_public_key keys[2];
+    keys[0].alg = BS_ALG_ED25519;
+    keys[0].key = bs_span_make("KEYA", 4U);
+    keys[1].alg = BS_ALG_ED25519;
+    keys[1].key = bs_span_make("KEYB", 4U);
+    tab.symbols = TAB.symbols;
+    tab.public_keys = keys;
+    tab.public_key_count = 2U;
+  }
+
+  /* No annotation: the authorizer, the current block and the authority. */
+  scopes.n = 0;
+  put_rule_block(&block, &scopes);
+  REQUIRE(trust_of(&block, 1U, &tok, &tab, &trust) == BS_OK);
+  CHECK(trust ==
+        (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U)));
+
+  /* `authority` says the same thing explicitly. */
+  scopes.n = 0;
+  put_scope_kind(&scopes, BS_SCOPE_AUTHORITY);
+  put_rule_block(&block, &scopes);
+  REQUIRE(trust_of(&block, 1U, &tok, &tab, &trust) == BS_OK);
+  CHECK(trust ==
+        (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U)));
+
+  /* `previous` adds every block up to and including this one. */
+  scopes.n = 0;
+  put_scope_kind(&scopes, BS_SCOPE_PREVIOUS);
+  put_rule_block(&block, &scopes);
+  REQUIRE(trust_of(&block, 2U, &tok, &tab, &trust) == BS_OK);
+  CHECK(trust == (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U) |
+                  BS_ORIGIN_ONE(2U)));
+
+  /* A public key names every block carrying an external signature by it --
+   * here blocks 2 and 3 -- plus the always-trusted pair. Note the authority
+   * is *not* included: an explicit annotation replaces the default. */
+  scopes.n = 0;
+  {
+    buf s;
+    s.n = 0;
+    put_tag(&s, BS_F_SCOPE_PUBLIC_KEY, BS_PB_VARINT);
+    put_varint(&s, 0U);
+    put_bytes(&scopes, BS_F_RULE_SCOPE, s.b, s.n);
+  }
+  put_rule_block(&block, &scopes);
+  REQUIRE(trust_of(&block, 1U, &tok, &tab, &trust) == BS_OK);
+  CHECK(trust == (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(1U) | BS_ORIGIN_ONE(2U) |
+                  BS_ORIGIN_ONE(3U)));
+
+  /* A key nobody signed with trusts nothing extra, which is the honest
+   * reading of "the blocks verified by this key" when there are none. */
+  scopes.n = 0;
+  {
+    buf s;
+    s.n = 0;
+    put_tag(&s, BS_F_SCOPE_PUBLIC_KEY, BS_PB_VARINT);
+    put_varint(&s, 1U);
+    put_bytes(&scopes, BS_F_RULE_SCOPE, s.b, s.n);
+  }
+  put_rule_block(&block, &scopes);
+  REQUIRE(trust_of(&block, 1U, &tok, &tab, &trust) == BS_OK);
+  CHECK(trust == (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(1U)));
+
+  /* Several annotations are added, not intersected. */
+  scopes.n = 0;
+  put_scope_kind(&scopes, BS_SCOPE_AUTHORITY);
+  {
+    buf s;
+    s.n = 0;
+    put_tag(&s, BS_F_SCOPE_PUBLIC_KEY, BS_PB_VARINT);
+    put_varint(&s, 0U);
+    put_bytes(&scopes, BS_F_RULE_SCOPE, s.b, s.n);
+  }
+  put_rule_block(&block, &scopes);
+  REQUIRE(trust_of(&block, 1U, &tok, &tab, &trust) == BS_OK);
+  CHECK(trust == (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U) |
+                  BS_ORIGIN_ONE(2U) | BS_ORIGIN_ONE(3U)));
+
+  /* A scope kind nobody has defined, and a key index past the table. */
+  scopes.n = 0;
+  put_scope_kind(&scopes, 7U);
+  put_rule_block(&block, &scopes);
+  CHECK(trust_of(&block, 1U, &tok, &tab, &trust) == BS_ERR_MALFORMED);
+
+  scopes.n = 0;
+  {
+    buf s;
+    s.n = 0;
+    put_tag(&s, BS_F_SCOPE_PUBLIC_KEY, BS_PB_VARINT);
+    put_varint(&s, 9U);
+    put_bytes(&scopes, BS_F_RULE_SCOPE, s.b, s.n);
+  }
+  put_rule_block(&block, &scopes);
+  CHECK(trust_of(&block, 1U, &tok, &tab, &trust) == BS_ERR_MALFORMED);
+}
+
 int main(void) {
   tables_for_tests();
   test_symbol_indices_span_the_whole_token();
@@ -716,5 +897,6 @@ int main(void) {
   test_load_rejects_deep_nesting();
   test_load_rejects_malformed_facts();
   test_load_reports_pool_exhaustion();
+  test_scope_resolution();
   return bs_test_finish();
 }

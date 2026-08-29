@@ -465,13 +465,18 @@ typedef struct bs_expr {
 #define BS_OP_CLOSURE 3U
 
 typedef struct bs_op {
-  uint8_t tag;
-  uint32_t kind;  /* the unary or binary opcode */
-  uint64_t ffi;   /* symbol index of an external call's name */
-  uint32_t term;  /* BS_OP_VALUE: into the term pool */
-  uint32_t at;    /* BS_OP_CLOSURE: parameters, into the symbol run pool */
-  uint32_t count; /* BS_OP_CLOSURE: parameter count */
-  bs_expr body;   /* BS_OP_CLOSURE: the closure's own ops */
+  uint8_t tag;   /* BS_OP_* */
+  uint32_t kind; /* the unary or binary opcode */
+  union {
+    uint32_t term; /* BS_OP_VALUE: into the term pool */
+    uint64_t ffi;  /* BS_OP_UNARY, BS_OP_BINARY: an external call's name */
+    struct {
+      uint32_t at;    /* parameters, into the symbol run pool */
+      uint32_t count; /* parameter count */
+      bs_expr body;   /* the closure's own ops, once placed */
+      bs_span src;    /* the encoded ops, while the body is still pending */
+    } closure;
+  } as;
 } bs_op;
 
 typedef struct bs_rule {
@@ -637,3 +642,13 @@ BS_API BS_MUST_USE bs_status bs_world_load_facts(bs_world *w, bs_symtab *syms,
                                                  const bs_symbols *from,
                                                  bs_span block,
                                                  size_t block_index);
+
+/* Load every rule and check a block states.
+ *
+ * Scope annotations are resolved to block-id sets here rather than during
+ * evaluation, so the fixpoint loop compares two bitmasks and nothing else.
+ * The token and its tables are needed because a scope may name a public key,
+ * which means "every block carrying an external signature by that key". */
+BS_API BS_MUST_USE bs_status bs_world_load_logic(
+    bs_world *w, bs_symtab *syms, const bs_symbols *from, const bs_token *t,
+    const bs_tables *tab, bs_span block, size_t block_index);
