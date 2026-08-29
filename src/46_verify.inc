@@ -105,6 +105,82 @@ static void bs_sha512_final(bs_sha512 *h, uint8_t out[BS_SHA512_DIGEST]) {
   }
 }
 
+/* Is the signature's S half a canonically reduced scalar, that is S < L?
+ *
+ * It has to be checked, and this cost the project a real defect. L*B is the
+ * identity, so S and S + k*L give the same point and both satisfy the
+ * verification equation: without this check a signature is malleable, and
+ * anyone holding a token can produce a different byte string that still
+ * verifies.
+ *
+ * That is not merely untidy here. The specification defines a block's
+ * revocation identifier as its signature, "as it uniquely identifies the
+ * block" -- so a malleable signature is a malleable revocation identifier,
+ * and a deny-list keyed on it can be stepped around by the holder of the very
+ * token it names. The reference implementation checks this (ed25519-dalek's
+ * verify_strict); the vendored NaCl code predates the requirement and does
+ * not.
+ *
+ * Constant-time, in the shape libsodium uses: walking down from the most
+ * significant byte, `n` stays set while every byte so far has matched, and
+ * `c` latches as soon as a byte of S falls below the corresponding byte of L.
+ */
+static int bs_scalar_is_canonical(bs_span s) {
+  unsigned int c = 0;
+  unsigned int n = 1;
+  size_t i = 32U;
+
+  if (s.n != 32U) {
+    return 0;
+  }
+  do {
+    unsigned int a;
+    unsigned int b;
+    i--;
+    a = (unsigned int)s.p[i];
+    b = (unsigned int)bs_na_L[i];
+    c |= ((a - b) >> 8U) & n & 1U;
+    n &= (((a ^ b) - 1U) >> 8U) & 1U;
+  } while (i != 0U);
+
+  return c != 0U;
+}
+
+/* Does this point have order dividing 8?
+ *
+ * A small-order public key makes one signature verify every message, which
+ * turns "this block was signed by that third party" into a statement with no
+ * content. The reference rejects these too, via verify_strict.
+ *
+ * Checked by tripling the point rather than by comparing against a table of
+ * known small-order encodings: three doublings cost almost nothing next to
+ * the scalar multiplication already happening, and a table is a transcription
+ * that can be got wrong silently. */
+static int bs_point_is_small_order(const bs_na_gf *q) {
+  bs_na_gf p[4];
+  uint8_t enc[32];
+  size_t i;
+  size_t j;
+  unsigned int diff;
+
+  for (i = 0; i < 4U; i++) {
+    for (j = 0; j < 16U; j++) {
+      p[i][j] = q[i][j];
+    }
+  }
+  bs_na_add(p, p); /* 2Q */
+  bs_na_add(p, p); /* 4Q */
+  bs_na_add(p, p); /* 8Q */
+  bs_na_pack(enc, p);
+
+  /* The identity encodes as 1. */
+  diff = (unsigned int)enc[0] ^ 1U;
+  for (i = 1U; i < 32U; i++) {
+    diff |= (unsigned int)enc[i];
+  }
+  return diff == 0U;
+}
+
 /* Verify a detached Ed25519 signature.
  *
  * The equation is the one in RFC 8032 section 5.1.7: with A the public key,
@@ -136,9 +212,17 @@ static bs_status bs_ed25519_verify_parts(bs_span pubkey, bs_span sig,
   if (!bs_span_slice(sig, 0U, 32U, &r) || !bs_span_slice(sig, 32U, 32U, &s)) {
     return BS_ERR_SIGNATURE;
   }
+  /* Both guards match the reference's verify_strict. Neither is optional:
+   * see the notes on each. */
+  if (!bs_scalar_is_canonical(s)) {
+    return BS_ERR_SIGNATURE;
+  }
   /* unpackneg yields -A, which is why the equation above is written with a
    * subtraction and computed here with an addition. */
   if (bs_na_unpackneg(q, pubkey.p) != 0) {
+    return BS_ERR_SIGNATURE;
+  }
+  if (bs_point_is_small_order(q)) {
     return BS_ERR_SIGNATURE;
   }
 

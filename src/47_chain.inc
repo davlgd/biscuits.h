@@ -45,10 +45,16 @@ static void bs_le32(uint8_t out[4], uint32_t v) {
 
 /* Build the payload a block's signature covers.
  *
- * `prev_sig` is empty for the authority block, which has no predecessor -- and
- * that is not a special case bolted on: the authority's payload genuinely has
- * no PREVSIG section, which is what makes an authority signature unusable in
- * any other position in any other token. */
+ * `prev_sig` is empty for the authority block, which has no predecessor. In
+ * payload version 1 that is load-bearing: the authority's payload has no
+ * PREVSIG section, so an authority signature cannot be replayed in any other
+ * position or any other token.
+ *
+ * Version 0 gives no such guarantee. There, the authority and appended
+ * payloads are identical by construction -- data, algorithm, next key, with
+ * nothing naming the position -- which is exactly the weakness version 1
+ * exists to close. Reproduced here because tokens signed that way exist, not
+ * because it is sound. */
 static bs_status bs_block_payload(const bs_signed_block *b, bs_span prev_sig,
                                   int is_authority, uint8_t ver_le[4],
                                   uint8_t alg_le[4], bs_span *parts,

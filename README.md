@@ -68,7 +68,7 @@ would be the kind of claim this table exists to avoid.
 | # | Invariant | Why it matters | Enforcement |
 |---|---|---|---|
 | 1 | **No allocation.** All memory comes from a caller-provided arena, never freed piecewise. | Use-after-free and double-free become unreachable by construction — the bug class a borrow checker exists to prevent. | undefined symbols of the compiled object |
-| 2 | **No recursion.** Nested terms and closures are walked with an explicit bounded stack. | Stack depth is a compile-time constant. Deep nesting returns `BS_ERR_DEPTH`, never a crash. | cycle detection over the compiler's own call graph |
+| 2 | **No recursion.** Nested terms and closures are walked with an explicit bounded stack. | Stack depth is a compile-time constant, measured at 6.6 KB for verification and 2.8 KB for printing. Deep nesting returns `BS_ERR_DEPTH`, never a crash. | cycle detection over the compiler's own call graph, plus a measured stack bound |
 | 3 | **Bounded loops.** Every loop has a static or caller-supplied bound. | Datalog evaluation cannot be made to run forever by a hostile token. | review |
 | 4 | **Pointer arithmetic is confined** to an enumerated set of accessors. | When a fuzzer finds an out-of-bounds read, the set of places it can have come from is small enough to read in one sitting. | pinned site list |
 | 5 | **No libc beyond `memcpy`, `memcmp`, `memset`.** | No stdio, no locale, no floating point. Usable in a kernel module or bare metal without a shim. | undefined symbols of the compiled object |
@@ -143,8 +143,8 @@ tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         4113 lines
-object -Os    35664 bytes
+header         4233 lines
+object -Os    36392 bytes
 ```
 <!-- metrics:end -->
 
@@ -186,6 +186,7 @@ make asan        # AddressSanitizer + UndefinedBehaviorSanitizer
 make lint        # amalgamation, format, clang-tidy, cppcheck, invariants
 make analyze     # clang static analyzer
 make fuzz-smoke  # a short seeded run of every fuzz target
+make stack       # worst-case stack depth, from the compiler's own numbers
 make metrics     # regenerate the size figures in this file
 ```
 

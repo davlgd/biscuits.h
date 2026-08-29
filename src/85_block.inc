@@ -190,7 +190,11 @@ static bs_status bs_tables_collect(bs_arena *a, const bs_signed_block *blocks,
   BS_ASSERT(key_at <= total_keys); /* duplicates were folded away */
   out->symbols.entries = sym_slots;
   out->symbols.count = total_symbols;
-  out->public_key_count = total_keys;
+  /* key_at, not total_keys: the count is of distinct keys actually written,
+   * and duplicates were folded away. Publishing the pre-deduplication figure
+   * would make scope indices in the gap resolve to zeroed entries and render
+   * as a trust clause naming an all-zero key. */
+  out->public_key_count = key_at;
   return BS_OK;
 }
 
@@ -304,7 +308,11 @@ BS_API bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
  * bodies. A predicate with no terms prints as `name()`. */
 BS_API bs_status bs_predicate_print(bs_writer *w, const bs_tables *tab,
                                     bs_span pred) {
-  bs_cursor c = bs_cursor_make(pred);
+  bs_cursor c;
+  if (w == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  c = bs_cursor_make(pred);
   bs_pb_field f;
   bs_span name = bs_span_make(NULL, 0);
   int have_name = 0;
@@ -355,7 +363,11 @@ BS_API bs_status bs_predicate_print(bs_writer *w, const bs_tables *tab,
 /* A Fact is a Predicate in a one-field wrapper. */
 BS_API bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
                                bs_span fact) {
-  bs_cursor c = bs_cursor_make(fact);
+  bs_cursor c;
+  if (w == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  c = bs_cursor_make(fact);
   bs_pb_field f;
   int found = 0;
   bs_span pred = bs_span_make(NULL, 0);

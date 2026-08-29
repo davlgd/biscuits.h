@@ -356,10 +356,121 @@ static void test_ed25519_rejects_bad_shapes(void) {
                    bs_span_make(NULL, 0U)) == BS_ERR_SIGNATURE);
 }
 
+/* L, the order of the Ed25519 base point, little-endian. Adding it to a
+ * signature's S half produces a different byte string that satisfies the same
+ * verification equation -- which is precisely what must be refused. */
+static const uint8_t ED25519_L[32] = {
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+    0xa2, 0xde, 0xf9, 0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+};
+
+/* out = in + k*L, little-endian, modulo 2^256. */
+static void add_l(const uint8_t in[32], unsigned int k, uint8_t out[32]) {
+  unsigned int i;
+  unsigned int j;
+  for (i = 0; i < 32U; i++) {
+    out[i] = in[i];
+  }
+  for (j = 0; j < k; j++) {
+    unsigned int carry = 0;
+    for (i = 0; i < 32U; i++) {
+      unsigned int sum =
+          (unsigned int)out[i] + (unsigned int)ED25519_L[i] + carry;
+      out[i] = (uint8_t)(sum & 0xFFU);
+      carry = sum >> 8U;
+    }
+  }
+}
+
+static void test_ed25519_rejects_malleable_signatures(void) {
+  /* This is a regression test for a defect that shipped.
+   *
+   * L*B is the identity, so S and S + k*L give the same point and both
+   * satisfy the verification equation. The vendored NaCl code predates the
+   * requirement to reject that, and nothing here added the check -- so for a
+   * while any holder of a token could produce a different byte string that
+   * still verified.
+   *
+   * That is not cosmetic: the specification defines a block's revocation
+   * identifier as its signature, so a malleable signature is a revocation
+   * identifier the holder can rewrite, and a deny-list naming a token could
+   * be stepped around by whoever holds it. */
+  uint8_t pk[32];
+  uint8_t sig[64];
+  uint8_t mutated[64];
+  unsigned int k;
+
+  (void)unhex(
+      "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", pk,
+      sizeof pk);
+  (void)unhex(
+      "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+      "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      sig, sizeof sig);
+
+  /* The canonical signature verifies. */
+  CHECK(verify_one(bs_span_make(pk, 32U), bs_span_make(sig, 64U),
+                   bs_span_make(NULL, 0U)) == BS_OK);
+
+  /* Every non-canonical variant of it must not. */
+  for (k = 1U; k <= 4U; k++) {
+    memcpy(mutated, sig, 64U);
+    add_l(&sig[32], k, &mutated[32]);
+    CHECK(memcmp(mutated, sig, 64U) != 0);
+    CHECK(verify_one(bs_span_make(pk, 32U), bs_span_make(mutated, 64U),
+                     bs_span_make(NULL, 0U)) == BS_ERR_SIGNATURE);
+  }
+
+  /* S exactly equal to L is also non-canonical: the bound is strict. */
+  memcpy(mutated, sig, 64U);
+  memcpy(&mutated[32], ED25519_L, 32U);
+  CHECK(verify_one(bs_span_make(pk, 32U), bs_span_make(mutated, 64U),
+                   bs_span_make(NULL, 0U)) == BS_ERR_SIGNATURE);
+}
+
+static void test_ed25519_rejects_small_order_keys(void) {
+  /* A small-order public key makes one signature verify every message, which
+   * empties "signed by that key" of content. The reference rejects these
+   * through verify_strict; so does this. */
+  static const uint8_t small_order[][32] = {
+      /* the identity */
+      {
+          0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      },
+      /* the point of order two */
+      {
+          0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+      },
+      /* one of the points of order eight */
+      {
+          0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4,
+          0x89, 0xf2, 0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6,
+          0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05,
+      },
+  };
+  uint8_t sig[64];
+  size_t i;
+
+  memset(sig, 0, sizeof sig);
+  sig[32] = 1U; /* a canonical S, so the scalar check is not what rejects it */
+
+  for (i = 0; i < sizeof small_order / sizeof small_order[0]; i++) {
+    CHECK(verify_one(bs_span_make(small_order[i], 32U), bs_span_make(sig, 64U),
+                     bs_span_make(NULL, 0U)) == BS_ERR_SIGNATURE);
+  }
+}
+
 int main(void) {
   test_sha512_vectors();
   test_sha512_streaming_matches_one_shot();
   test_ed25519_vectors();
   test_ed25519_rejects_bad_shapes();
+  test_ed25519_rejects_malleable_signatures();
+  test_ed25519_rejects_small_order_keys();
   return bs_test_finish();
 }

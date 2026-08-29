@@ -69,17 +69,26 @@
  * mbedTLS, BearSSL or a platform keystore, since a second copy of the same
  * curve arithmetic costs space and doubles the code a reviewer must trust.
  *
- * In that mode you define one function:
+ * In that mode you define two functions.
  *
  *   bs_status bs_ed25519_verify_parts(bs_span pubkey, bs_span sig,
  *                                     const bs_span *parts, size_t count);
  *
- * It must return BS_OK when `sig` is a valid Ed25519 signature by `pubkey`
- * over the concatenation of `parts`, and BS_ERR_SIGNATURE otherwise. The
- * parts are given separately rather than joined because the message includes
- * the block data, and joining it would mean a buffer the size of the input in
- * a library whose first invariant is that it never allocates. Every part is
- * valid for the duration of the call. */
+ * Returns BS_OK when `sig` is a valid Ed25519 signature by `pubkey` over the
+ * concatenation of `parts`, and BS_ERR_SIGNATURE otherwise. It must reject a
+ * non-canonical scalar (S >= L) and a small-order public key, as RFC 8032's
+ * strict verification and the reference implementation both do: a signature
+ * that is malleable is a revocation identifier that is malleable. The parts
+ * are given separately rather than joined because the message includes the
+ * block data, and joining it would mean a buffer the size of the input in a
+ * library whose first invariant is that it never allocates. Every part is
+ * valid for the duration of the call.
+ *
+ *   bs_status bs_ed25519_public_from_secret(bs_span seed, uint8_t out[32]);
+ *
+ * Takes a 32-byte Ed25519 seed and writes the RFC 8032 public key derived
+ * from it. This is how an unsealed token's proof is checked against the last
+ * block's next key, which is what proves the chain was not truncated. */
 #ifndef BISCUITS_NO_BUNDLED_CRYPTO
 #define BS_BUNDLED_CRYPTO 1
 #endif

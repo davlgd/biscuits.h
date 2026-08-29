@@ -27,6 +27,35 @@ form. Please do not open a public issue for anything exploitable.
 
 Expect an acknowledgement within a week.
 
+## What has gone wrong so far
+
+Recording this because a security file that only lists what passes is a
+marketing document.
+
+**Signature malleability.** An adversarial review found that the vendored
+NaCl verifier accepts a non-canonical scalar: L*B is the identity, so S and
+S + k*L satisfy the same equation and both verify. The specification defines a
+block's revocation identifier as its signature, so the consequence was that
+anyone holding a token could produce a different byte string that still
+verified with different revocation identifiers — defeating the one control
+aimed at an attacker who already holds a valid token. Reproduced on an
+unmodified specification sample, confirmed against the reference
+implementation, fixed, and pinned by regression tests. It was in the tree for
+one commit.
+
+The lesson is narrow and worth stating: vendoring a reviewed implementation
+transfers its assumptions along with its code. NaCl's API predates the
+requirement to reject malleable signatures; taking `crypto_sign_open` and
+calling the result RFC 8032 verification was the error, and no amount of test
+vectors from RFC 8032 itself would have caught it, because RFC 8032's vectors
+do not include malleated signatures.
+
+**A stack figure that was never measured.** This documentation claimed the
+library ran in 4 KB of stack. The measured worst case is 6 592 bytes. The
+figure had been written from intuition; there is now a `make stack` target
+that computes it from the compiler's own frame sizes, and CI fails if it
+grows.
+
 ## The honest position
 
 This is a C library that parses attacker-controlled bytes. C is not
@@ -80,6 +109,8 @@ Claims without a number in this table are not yet claims.
 | Constant-time secret handling | Valgrind/TIMECOP technique on the Linux job | not started |
 | Specification conformance | 36 of the 38 official sample tokens | decode 48/48, revocation ids 43/43, signatures 47/47, blocks 43/43; authorization not started |
 | Ed25519 against RFC 8032 vectors | `make unit`, positive and rejection cases | passing |
+| Signature malleability rejected | non-canonical scalars (S >= L) and small-order public keys refused, matching the reference's strict verification | passing, after a defect |
+| Worst-case stack bounded | `make stack` — compiler frame sizes over the call graph, exact because there is no recursion | 6 592 bytes, gated at 8 KB |
 | Ed25519 against Project Wycheproof | malleability and low-order points | not started |
 | Builds without bundled crypto | `make unbundled` | passing |
 

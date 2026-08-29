@@ -302,7 +302,10 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       tok.has_root_key_id = 1;
       break;
     case BS_F_BISCUIT_AUTHORITY:
-      if (f.wire != BS_PB_BYTES) {
+      /* Singular in the schema. Taking the last occurrence, as a general
+       * protobuf decoder would, lets one token carry two authority blocks and
+       * leaves which one is verified up to the reader. */
+      if (f.wire != BS_PB_BYTES || have_authority) {
         return BS_ERR_MALFORMED;
       }
       authority = f.bytes;
@@ -317,7 +320,7 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       }
       break;
     case BS_F_BISCUIT_PROOF:
-      if (f.wire != BS_PB_BYTES) {
+      if (f.wire != BS_PB_BYTES || have_proof) {
         return BS_ERR_MALFORMED;
       }
       proof = f.bytes;

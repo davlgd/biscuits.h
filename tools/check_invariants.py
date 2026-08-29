@@ -83,6 +83,7 @@ POINTER_ARITHMETIC_SITES = {
     "bs_put_hex",
     "bs_put_string",
     "bs_symbol_get",
+    "bs_scalar_is_canonical",  # walks the 32 bytes of a signature scalar
 }
 
 

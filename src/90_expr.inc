@@ -39,9 +39,15 @@
 
 #define BS_B_FFI 28U
 
-/* How a binary operator is written. The specification defines the opcodes;
- * this table defines their surface syntax, and every entry is taken from the
- * conformance samples rather than guessed. */
+/* How a binary operator is written.
+ *
+ * The specification defines the opcodes; this table defines their surface
+ * syntax. Most entries come from the conformance samples, but the samples do
+ * not exercise every opcode -- the eager And and Or are absent from all 38 --
+ * so those were taken from the reference implementation's own printer, where
+ * eager renders as `&&!` and `||!` and short-circuiting as `&&` and `||`.
+ * Printing all four the same way was a real divergence that the samples could
+ * not have caught. */
 #define BS_OP_INFIX 0U
 #define BS_OP_METHOD 1U
 
@@ -67,8 +73,8 @@ static const bs_binop BS_BINOPS[] = {
     BS_OP(BS_OP_INFIX, "-"),             /* 10 Sub */
     BS_OP(BS_OP_INFIX, "*"),             /* 11 Mul */
     BS_OP(BS_OP_INFIX, "/"),             /* 12 Div */
-    BS_OP(BS_OP_INFIX, "&&"),            /* 13 And */
-    BS_OP(BS_OP_INFIX, "||"),            /* 14 Or */
+    BS_OP(BS_OP_INFIX, "&&!"),           /* 13 And, eager */
+    BS_OP(BS_OP_INFIX, "||!"),           /* 14 Or, eager */
     BS_OP(BS_OP_METHOD, "intersection"), /* 15 Intersection */
     BS_OP(BS_OP_METHOD, "union"),        /* 16 Union */
     BS_OP(BS_OP_INFIX, "&"),             /* 17 BitwiseAnd */
@@ -77,8 +83,8 @@ static const bs_binop BS_BINOPS[] = {
     BS_OP(BS_OP_INFIX, "!=="),           /* 20 NotEqual */
     BS_OP(BS_OP_INFIX, "=="),            /* 21 HeterogeneousEqual */
     BS_OP(BS_OP_INFIX, "!="),            /* 22 HeterogeneousNotEqual */
-    BS_OP(BS_OP_INFIX, "&&"),            /* 23 LazyAnd */
-    BS_OP(BS_OP_INFIX, "||"),            /* 24 LazyOr */
+    BS_OP(BS_OP_INFIX, "&&"),            /* 23 LazyAnd, short-circuiting */
+    BS_OP(BS_OP_INFIX, "||"),            /* 24 LazyOr, short-circuiting */
     BS_OP(BS_OP_METHOD, "all"),          /* 25 All */
     BS_OP(BS_OP_METHOD, "any"),          /* 26 Any */
     BS_OP(BS_OP_METHOD, "get"),          /* 27 Get */

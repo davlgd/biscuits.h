@@ -277,8 +277,16 @@ analyze: $(HEADER) | $(BUILD)
 invariants: $(HEADER)
 	@$(PYTHON) tools/check_invariants.py --cc $(CLANG)
 
+# Worst-case stack, computed from the compiler's own frame sizes and call
+# graph. A ratchet, not a target: the bound is above today's measurement so
+# that growth is visible, and the documented figure must be the measured one.
+.PHONY: stack
+stack: $(HEADER)
+	@$(PYTHON) tools/stack_usage.py --cc $(CLANG) --max-bytes 8192
+
 .PHONY: lint
-lint: check-amalgamation format-check tidy cppcheck invariants check-metrics
+lint: check-amalgamation format-check tidy cppcheck invariants check-metrics \
+      stack
 
 .PHONY: format
 format:

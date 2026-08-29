@@ -148,17 +148,26 @@ extern "C" {
  * mbedTLS, BearSSL or a platform keystore, since a second copy of the same
  * curve arithmetic costs space and doubles the code a reviewer must trust.
  *
- * In that mode you define one function:
+ * In that mode you define two functions.
  *
  *   bs_status bs_ed25519_verify_parts(bs_span pubkey, bs_span sig,
  *                                     const bs_span *parts, size_t count);
  *
- * It must return BS_OK when `sig` is a valid Ed25519 signature by `pubkey`
- * over the concatenation of `parts`, and BS_ERR_SIGNATURE otherwise. The
- * parts are given separately rather than joined because the message includes
- * the block data, and joining it would mean a buffer the size of the input in
- * a library whose first invariant is that it never allocates. Every part is
- * valid for the duration of the call. */
+ * Returns BS_OK when `sig` is a valid Ed25519 signature by `pubkey` over the
+ * concatenation of `parts`, and BS_ERR_SIGNATURE otherwise. It must reject a
+ * non-canonical scalar (S >= L) and a small-order public key, as RFC 8032's
+ * strict verification and the reference implementation both do: a signature
+ * that is malleable is a revocation identifier that is malleable. The parts
+ * are given separately rather than joined because the message includes the
+ * block data, and joining it would mean a buffer the size of the input in a
+ * library whose first invariant is that it never allocates. Every part is
+ * valid for the duration of the call.
+ *
+ *   bs_status bs_ed25519_public_from_secret(bs_span seed, uint8_t out[32]);
+ *
+ * Takes a 32-byte Ed25519 seed and writes the RFC 8032 public key derived
+ * from it. This is how an unsealed token's proof is checked against the last
+ * block's next key, which is what proves the chain was not truncated. */
 #ifndef BISCUITS_NO_BUNDLED_CRYPTO
 #define BS_BUNDLED_CRYPTO 1
 #endif
@@ -1491,6 +1500,82 @@ static void bs_sha512_final(bs_sha512 *h, uint8_t out[BS_SHA512_DIGEST]) {
   }
 }
 
+/* Is the signature's S half a canonically reduced scalar, that is S < L?
+ *
+ * It has to be checked, and this cost the project a real defect. L*B is the
+ * identity, so S and S + k*L give the same point and both satisfy the
+ * verification equation: without this check a signature is malleable, and
+ * anyone holding a token can produce a different byte string that still
+ * verifies.
+ *
+ * That is not merely untidy here. The specification defines a block's
+ * revocation identifier as its signature, "as it uniquely identifies the
+ * block" -- so a malleable signature is a malleable revocation identifier,
+ * and a deny-list keyed on it can be stepped around by the holder of the very
+ * token it names. The reference implementation checks this (ed25519-dalek's
+ * verify_strict); the vendored NaCl code predates the requirement and does
+ * not.
+ *
+ * Constant-time, in the shape libsodium uses: walking down from the most
+ * significant byte, `n` stays set while every byte so far has matched, and
+ * `c` latches as soon as a byte of S falls below the corresponding byte of L.
+ */
+static int bs_scalar_is_canonical(bs_span s) {
+  unsigned int c = 0;
+  unsigned int n = 1;
+  size_t i = 32U;
+
+  if (s.n != 32U) {
+    return 0;
+  }
+  do {
+    unsigned int a;
+    unsigned int b;
+    i--;
+    a = (unsigned int)s.p[i];
+    b = (unsigned int)bs_na_L[i];
+    c |= ((a - b) >> 8U) & n & 1U;
+    n &= (((a ^ b) - 1U) >> 8U) & 1U;
+  } while (i != 0U);
+
+  return c != 0U;
+}
+
+/* Does this point have order dividing 8?
+ *
+ * A small-order public key makes one signature verify every message, which
+ * turns "this block was signed by that third party" into a statement with no
+ * content. The reference rejects these too, via verify_strict.
+ *
+ * Checked by tripling the point rather than by comparing against a table of
+ * known small-order encodings: three doublings cost almost nothing next to
+ * the scalar multiplication already happening, and a table is a transcription
+ * that can be got wrong silently. */
+static int bs_point_is_small_order(const bs_na_gf *q) {
+  bs_na_gf p[4];
+  uint8_t enc[32];
+  size_t i;
+  size_t j;
+  unsigned int diff;
+
+  for (i = 0; i < 4U; i++) {
+    for (j = 0; j < 16U; j++) {
+      p[i][j] = q[i][j];
+    }
+  }
+  bs_na_add(p, p); /* 2Q */
+  bs_na_add(p, p); /* 4Q */
+  bs_na_add(p, p); /* 8Q */
+  bs_na_pack(enc, p);
+
+  /* The identity encodes as 1. */
+  diff = (unsigned int)enc[0] ^ 1U;
+  for (i = 1U; i < 32U; i++) {
+    diff |= (unsigned int)enc[i];
+  }
+  return diff == 0U;
+}
+
 /* Verify a detached Ed25519 signature.
  *
  * The equation is the one in RFC 8032 section 5.1.7: with A the public key,
@@ -1522,9 +1607,17 @@ static bs_status bs_ed25519_verify_parts(bs_span pubkey, bs_span sig,
   if (!bs_span_slice(sig, 0U, 32U, &r) || !bs_span_slice(sig, 32U, 32U, &s)) {
     return BS_ERR_SIGNATURE;
   }
+  /* Both guards match the reference's verify_strict. Neither is optional:
+   * see the notes on each. */
+  if (!bs_scalar_is_canonical(s)) {
+    return BS_ERR_SIGNATURE;
+  }
   /* unpackneg yields -A, which is why the equation above is written with a
    * subtraction and computed here with an addition. */
   if (bs_na_unpackneg(q, pubkey.p) != 0) {
+    return BS_ERR_SIGNATURE;
+  }
+  if (bs_point_is_small_order(q)) {
     return BS_ERR_SIGNATURE;
   }
 
@@ -1629,10 +1722,16 @@ static void bs_le32(uint8_t out[4], uint32_t v) {
 
 /* Build the payload a block's signature covers.
  *
- * `prev_sig` is empty for the authority block, which has no predecessor -- and
- * that is not a special case bolted on: the authority's payload genuinely has
- * no PREVSIG section, which is what makes an authority signature unusable in
- * any other position in any other token. */
+ * `prev_sig` is empty for the authority block, which has no predecessor. In
+ * payload version 1 that is load-bearing: the authority's payload has no
+ * PREVSIG section, so an authority signature cannot be replayed in any other
+ * position or any other token.
+ *
+ * Version 0 gives no such guarantee. There, the authority and appended
+ * payloads are identical by construction -- data, algorithm, next key, with
+ * nothing naming the position -- which is exactly the weakness version 1
+ * exists to close. Reproduced here because tokens signed that way exist, not
+ * because it is sound. */
 static bs_status bs_block_payload(const bs_signed_block *b, bs_span prev_sig,
                                   int is_authority, uint8_t ver_le[4],
                                   uint8_t alg_le[4], bs_span *parts,
@@ -2269,7 +2368,10 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       tok.has_root_key_id = 1;
       break;
     case BS_F_BISCUIT_AUTHORITY:
-      if (f.wire != BS_PB_BYTES) {
+      /* Singular in the schema. Taking the last occurrence, as a general
+       * protobuf decoder would, lets one token carry two authority blocks and
+       * leaves which one is verified up to the reader. */
+      if (f.wire != BS_PB_BYTES || have_authority) {
         return BS_ERR_MALFORMED;
       }
       authority = f.bytes;
@@ -2284,7 +2386,7 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       }
       break;
     case BS_F_BISCUIT_PROOF:
-      if (f.wire != BS_PB_BYTES) {
+      if (f.wire != BS_PB_BYTES || have_proof) {
         return BS_ERR_MALFORMED;
       }
       proof = f.bytes;
@@ -3149,7 +3251,11 @@ static bs_status bs_tables_collect(bs_arena *a, const bs_signed_block *blocks,
   BS_ASSERT(key_at <= total_keys); /* duplicates were folded away */
   out->symbols.entries = sym_slots;
   out->symbols.count = total_symbols;
-  out->public_key_count = total_keys;
+  /* key_at, not total_keys: the count is of distinct keys actually written,
+   * and duplicates were folded away. Publishing the pre-deduplication figure
+   * would make scope indices in the gap resolve to zeroed entries and render
+   * as a trust clause naming an all-zero key. */
+  out->public_key_count = key_at;
   return BS_OK;
 }
 
@@ -3263,7 +3369,11 @@ BS_API bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
  * bodies. A predicate with no terms prints as `name()`. */
 BS_API bs_status bs_predicate_print(bs_writer *w, const bs_tables *tab,
                                     bs_span pred) {
-  bs_cursor c = bs_cursor_make(pred);
+  bs_cursor c;
+  if (w == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  c = bs_cursor_make(pred);
   bs_pb_field f;
   bs_span name = bs_span_make(NULL, 0);
   int have_name = 0;
@@ -3314,7 +3424,11 @@ BS_API bs_status bs_predicate_print(bs_writer *w, const bs_tables *tab,
 /* A Fact is a Predicate in a one-field wrapper. */
 BS_API bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
                                bs_span fact) {
-  bs_cursor c = bs_cursor_make(fact);
+  bs_cursor c;
+  if (w == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  c = bs_cursor_make(fact);
   bs_pb_field f;
   int found = 0;
   bs_span pred = bs_span_make(NULL, 0);
@@ -3381,9 +3495,15 @@ BS_API bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
 
 #define BS_B_FFI 28U
 
-/* How a binary operator is written. The specification defines the opcodes;
- * this table defines their surface syntax, and every entry is taken from the
- * conformance samples rather than guessed. */
+/* How a binary operator is written.
+ *
+ * The specification defines the opcodes; this table defines their surface
+ * syntax. Most entries come from the conformance samples, but the samples do
+ * not exercise every opcode -- the eager And and Or are absent from all 38 --
+ * so those were taken from the reference implementation's own printer, where
+ * eager renders as `&&!` and `||!` and short-circuiting as `&&` and `||`.
+ * Printing all four the same way was a real divergence that the samples could
+ * not have caught. */
 #define BS_OP_INFIX 0U
 #define BS_OP_METHOD 1U
 
@@ -3409,8 +3529,8 @@ static const bs_binop BS_BINOPS[] = {
     BS_OP(BS_OP_INFIX, "-"),             /* 10 Sub */
     BS_OP(BS_OP_INFIX, "*"),             /* 11 Mul */
     BS_OP(BS_OP_INFIX, "/"),             /* 12 Div */
-    BS_OP(BS_OP_INFIX, "&&"),            /* 13 And */
-    BS_OP(BS_OP_INFIX, "||"),            /* 14 Or */
+    BS_OP(BS_OP_INFIX, "&&!"),           /* 13 And, eager */
+    BS_OP(BS_OP_INFIX, "||!"),           /* 14 Or, eager */
     BS_OP(BS_OP_METHOD, "intersection"), /* 15 Intersection */
     BS_OP(BS_OP_METHOD, "union"),        /* 16 Union */
     BS_OP(BS_OP_INFIX, "&"),             /* 17 BitwiseAnd */
@@ -3419,8 +3539,8 @@ static const bs_binop BS_BINOPS[] = {
     BS_OP(BS_OP_INFIX, "!=="),           /* 20 NotEqual */
     BS_OP(BS_OP_INFIX, "=="),            /* 21 HeterogeneousEqual */
     BS_OP(BS_OP_INFIX, "!="),            /* 22 HeterogeneousNotEqual */
-    BS_OP(BS_OP_INFIX, "&&"),            /* 23 LazyAnd */
-    BS_OP(BS_OP_INFIX, "||"),            /* 24 LazyOr */
+    BS_OP(BS_OP_INFIX, "&&"),            /* 23 LazyAnd, short-circuiting */
+    BS_OP(BS_OP_INFIX, "||"),            /* 24 LazyOr, short-circuiting */
     BS_OP(BS_OP_METHOD, "all"),          /* 25 All */
     BS_OP(BS_OP_METHOD, "any"),          /* 26 Any */
     BS_OP(BS_OP_METHOD, "get"),          /* 27 Get */

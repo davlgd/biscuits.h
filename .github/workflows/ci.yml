@@ -82,6 +82,9 @@ jobs:
       - run: make invariants
         env:
           CLANG: clang
+      - run: make stack
+        env:
+          CLANG: clang
 
   # A short seeded run of every fuzz target. This is a regression gate, not a
   # security argument -- that needs continuous fuzzing, which needs OSS-Fuzz --

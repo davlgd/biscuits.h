@@ -52,8 +52,27 @@ A recursive decoder over attacker-controlled nesting is a stack overflow with
 extra steps, and a stack overflow in a library is not something the caller can
 catch. Here, exceeding the bound is `BS_ERR_DEPTH` — an ordinary error return.
 
-Maximum stack usage is therefore a compile-time constant, which is what makes
-the library usable on a device with a 4 KB stack.
+Maximum stack usage is therefore a compile-time constant rather than a
+function of the input. The constant is measured, not estimated: `make stack`
+combines the compiler's own `-fstack-usage` frame sizes with the call graph
+from the LLVM IR, and because there is no recursion and no indirect call the
+deepest path is an exact longest-path over a DAG.
+
+At `-O2` with clang on arm64, today:
+
+| Entry point | Deepest path |
+|---|---|
+| `bs_token_verify` | **6 592 bytes** |
+| `bs_block_print` | 2 752 bytes |
+
+An earlier version of this document claimed 4 KB. That figure was never
+measured and was wrong; the vendored curve arithmetic alone accounts for more
+than half of the real number, with `bs_na_add` at 1 728 bytes and
+`bs_ed25519_verify_parts` at 2 128. Defining `BISCUITS_NO_BUNDLED_CRYPTO`
+removes that path entirely and leaves the printer's 2 752 bytes as the worst
+case.
+
+`make stack` fails above 8 KB, so growth is visible rather than discovered.
 
 ### 3. Bounded loops
 
