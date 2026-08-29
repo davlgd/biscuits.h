@@ -27,6 +27,8 @@ PARTS = [
     "20_api.inc",
     "30_impl_open.inc",
     "40_util.inc",
+    "50_pb.inc",
+    "60_token.inc",
     "99_epilogue.inc",
 ]
 

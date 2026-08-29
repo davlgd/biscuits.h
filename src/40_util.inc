@@ -209,8 +209,14 @@ BS_API void *bs_arena_alloc(bs_arena *a, size_t size, size_t align) {
   if (size == 0U) {
     size = 1U;
   }
+  /* `start > end` cannot happen once bs_size_add has reported no overflow and
+   * size is at least 1. It is checked anyway: the overflow builtin is opaque
+   * to the static analyser, which therefore cannot relate `end` back to
+   * `start`, and without that relation it must assume the returned pointer
+   * may lie outside the buffer. Stating the invariant costs one comparison
+   * and buys a clean bounds proof. */
   if (!bs_size_align_up(a->off, align, &start) ||
-      !bs_size_add(start, size, &end) || end > a->cap) {
+      !bs_size_add(start, size, &end) || start > end || end > a->cap) {
     a->failed = 1;
     return NULL;
   }

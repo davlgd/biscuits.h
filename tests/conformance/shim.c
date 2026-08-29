@@ -19,7 +19,7 @@
 
 /* Grows as the library does. Each name here is a promise the runner will
  * hold us to; adding one before it works turns a skip into a failure. */
-static const char *const CAPABILITIES[] = {NULL};
+static const char *const CAPABILITIES[] = {"decode", "revocation_ids", NULL};
 
 /* The arena for one token. Sized generously for a test tool; the point of the
  * peak reporting is to learn what a real deployment would need. */
@@ -53,8 +53,29 @@ static int read_file(const char *path, uint8_t *buf, size_t cap, size_t *len) {
   return 1;
 }
 
-static void emit_unimplemented(const char *reason) {
-  (void)printf("{\"decode\":{\"error\":\"%s\"}}\n", reason);
+static void emit_decode_error(bs_status st) {
+  (void)printf("{\"decode\":{\"error\":\"%s\"}}\n", bs_strstatus(st));
+}
+
+static void emit_hex(bs_span s) {
+  static const char digits[] = "0123456789abcdef";
+  size_t i;
+  for (i = 0; i < s.n; i++) {
+    unsigned byte = s.p[i];
+    (void)putchar(digits[byte >> 4U]);
+    (void)putchar(digits[byte & 0x0FU]);
+  }
+}
+
+static void emit_token(const bs_token *t) {
+  size_t i;
+  (void)printf("{\"decode\":\"ok\",\"revocation_ids\":[");
+  for (i = 0; i < t->block_count; i++) {
+    (void)printf("%s\"", (i > 0) ? "," : "");
+    emit_hex(bs_token_revocation_id(t, i));
+    (void)putchar('"');
+  }
+  (void)printf("]}\n");
 }
 
 int main(int argc, char **argv) {
@@ -101,8 +122,15 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  /* Everything below this line is the work still to do. The token bytes are
-   * loaded and the arena is ready; what is missing is the decoder. */
-  emit_unimplemented("decoder not implemented");
+  {
+    bs_token token;
+    bs_status st =
+        bs_token_parse(&arena, bs_span_make(token_buf, token_len), &token);
+    if (st != BS_OK) {
+      emit_decode_error(st);
+      return 0;
+    }
+    emit_token(&token);
+  }
   return 0;
 }

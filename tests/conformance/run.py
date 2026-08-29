@@ -30,6 +30,18 @@ SAMPLES = ROOT / "vendor" / "biscuit-spec" / "samples" / "current"
 # failed. Only a tier the shim declares support for is scored at all.
 TIERS = ("decode", "revocation_ids", "blocks", "authorize")
 
+# Cases this implementation is documented as not supporting. They still run --
+# a skipped test hides a regression -- but a failure is reported as a TAP TODO
+# rather than counted against the score, and an unexpected pass is flagged.
+KNOWN_UNSUPPORTED = {
+    "test036_secp256r1.bc": "ECDSA secp256r1, deferred to 1.1 (SECURITY.md)",
+    "test037_secp256r1_third_party.bc": "ECDSA secp256r1, deferred to 1.1 (SECURITY.md)",
+}
+
+# Only these error kinds mean the token never decoded. A `signature` error is
+# the opposite: the token decoded perfectly and then failed verification.
+DECODE_FAILURE_KINDS = frozenset({"format"})
+
 # The sample file records Rust's error enum. A C implementation should not be
 # forced to reproduce another language's struct shapes, so both sides speak
 # this canonical vocabulary instead. It is derived from the specification, not
@@ -128,13 +140,18 @@ class Shim:
 def compare(tier: str, expected, actual) -> tuple:
     """Return (passed, detail). detail is only meaningful on failure."""
     if tier == "decode":
-        want_ok = expected["ok"] or expected.get("kind") not in ("format", "signature")
+        want_ok = expected["ok"] or expected.get("kind") not in DECODE_FAILURE_KINDS
         got_ok = actual.get("decode") == "ok"
         if want_ok != got_ok:
             return False, f"expected decode {'ok' if want_ok else 'failure'}, got {actual.get('decode')!r}"
         return True, ""
 
     if tier == "revocation_ids":
+        # The sample file records revocation identifiers only for tokens that
+        # got past signature verification; for the rest the list is empty and
+        # carries no information, so there is nothing to compare against.
+        if not expected["revocation_ids"]:
+            return None, "sample records no revocation ids for this case"
         want = [i.lower() for i in expected["revocation_ids"]]
         got = [str(i).lower() for i in actual.get("revocation_ids", [])]
         if want != got:
@@ -202,7 +219,7 @@ def main() -> int:
             cases.append((tc, name, validation))
 
     n = 0
-    tally = {t: [0, 0, 0] for t in TIERS}  # pass, fail, skip
+    tally = {t: [0, 0, 0, 0] for t in TIERS}  # pass, fail, skip, todo
     for tc, vname, validation in cases:
         token = SAMPLES / tc["filename"]
         actual = shim.evaluate(token, root_key, validation["authorizer_code"])
@@ -214,6 +231,8 @@ def main() -> int:
             "blocks": [b.get("code", "") for b in tc["token"]],
         }
         expected.update(expected["outcome"])
+
+        todo = KNOWN_UNSUPPORTED.get(tc["filename"])
 
         if "_shim_error" in actual:
             n += 1
@@ -228,7 +247,20 @@ def main() -> int:
                 tally[tier][2] += 1
                 print(f"ok {n} - {label} {tier} # SKIP not implemented")
                 continue
+
             passed, detail = compare(tier, expected, actual)
+            if passed is None:  # the sample carries nothing to compare
+                tally[tier][2] += 1
+                print(f"ok {n} - {label} {tier} # SKIP {detail}")
+                continue
+
+            if todo:
+                tally[tier][3] += 1
+                verdict = "ok" if passed else "not ok"
+                note = "unexpectedly passed" if passed else todo
+                print(f"{verdict} {n} - {label} {tier} # TODO {note}")
+                continue
+
             tally[tier][0 if passed else 1] += 1
             print(f"{'ok' if passed else 'not ok'} {n} - {label} {tier}")
             if not passed:
@@ -239,10 +271,10 @@ def main() -> int:
 
     print(f"1..{n}")
     print("#")
-    print("# tier              pass  fail  skip")
+    print("# tier              pass  fail  skip  todo")
     for t in TIERS:
-        p, f, s = tally[t]
-        print(f"# {t:<17} {p:>4}  {f:>4}  {s:>4}")
+        p, f, s, d = tally[t]
+        print(f"# {t:<17} {p:>4}  {f:>4}  {s:>4}  {d:>4}")
 
     full = sum(1 for tc in suite["testcases"]) if not args.filter else len(
         {c[0]["filename"] for c in cases})

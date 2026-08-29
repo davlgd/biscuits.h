@@ -132,3 +132,53 @@ BS_API void bs_arena_reset(bs_arena *a);
 BS_API size_t bs_arena_used(const bs_arena *a);
 BS_API size_t bs_arena_peak(const bs_arena *a);
 BS_API int bs_arena_failed(const bs_arena *a);
+
+/* ---------------------------------------------------------------------------
+ * Tokens
+ *
+ * A parsed token borrows every byte from the caller's input buffer: spans
+ * point into it, nothing is copied. The arena holds only the block array. So
+ * a bs_token is valid exactly as long as both the input and the arena are,
+ * and neither may be reused underneath it.
+ * ------------------------------------------------------------------------ */
+
+typedef enum bs_alg {
+  BS_ALG_ED25519 = 0,
+  BS_ALG_SECP256R1 = 1,
+} bs_alg;
+
+typedef struct bs_public_key {
+  bs_alg alg;
+  bs_span key;
+} bs_public_key;
+
+typedef struct bs_signed_block {
+  bs_span block; /* the serialized Block, still encoded */
+  bs_public_key next_key;
+  bs_span signature;
+  bs_span external_signature;
+  bs_public_key external_key;
+  int has_external;
+  uint32_t version; /* signature payload version; absent means 0 */
+} bs_signed_block;
+
+typedef struct bs_token {
+  bs_signed_block *blocks; /* blocks[0] is the authority block */
+  size_t block_count;
+  bs_span proof; /* nextSecret, or finalSignature when sealed */
+  uint32_t root_key_id;
+  int has_root_key_id;
+  int sealed;
+} bs_token;
+
+/* Decode the container. Does not verify anything: a BS_OK here means the
+ * token is well-formed, not that it is authentic.
+ *
+ * Returns BS_ERR_UNSUPPORTED for a token whose keys use an algorithm this
+ * build does not implement, so an unverifiable token can never be confused
+ * with a verified one. */
+BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out);
+
+/* The revocation identifier of a block: its signature, verbatim. Returns an
+ * empty span for an out-of-range index. */
+BS_API bs_span bs_token_revocation_id(const bs_token *t, size_t index);
