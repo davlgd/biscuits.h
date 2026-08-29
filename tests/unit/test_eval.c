@@ -944,6 +944,101 @@ static void test_evaluation_is_transient(void) {
   CHECK(W.term_count == terms_before);
 }
 
+/* --------------------------------------------------------------------------
+ * Regular expressions
+ * ----------------------------------------------------------------------- */
+
+/* Does `pattern` match anywhere in `text`? */
+static bs_status regex_match(const char *text, const char *pattern, int *out) {
+  uint64_t t = 0;
+  uint64_t p = 0;
+  if (!reset_world()) {
+    return BS_ERR_NOMEM;
+  }
+  if (bs_symtab_intern(&SYMS, bs_span_make(text, strlen(text)), &t) != BS_OK ||
+      bs_symtab_intern(&SYMS, bs_span_make(pattern, strlen(pattern)), &p) !=
+          BS_OK) {
+    return BS_ERR_NOMEM;
+  }
+  expr_begin();
+  op_value(t_str(t));
+  op_value(t_str(p));
+  op_binary(8U);
+  return run(out);
+}
+
+static int matches(const char *text, const char *pattern, int expect) {
+  int got = -1;
+  return regex_match(text, pattern, &got) == BS_OK && got == expect;
+}
+
+static void test_regex(void) {
+  /* Straight from the specification's own samples. */
+  CHECK(matches("aaabde", "a*c?.e", 1));
+  CHECK(matches("file1.txt", "file[0-9]+\\.txt", 1));
+  CHECK(matches("file123.txt", "file[0-9]+\\.txt", 1));
+  CHECK(matches("file.txt", "file[0-9]+\\.txt", 0));
+
+  /* The search is unanchored, like the reference: the pattern may match
+   * anywhere, not only from the start. */
+  CHECK(matches("xxabcxx", "abc", 1));
+  CHECK(matches("xxabcxx", "^abc", 0));
+  CHECK(matches("abcxx", "^abc", 1));
+  CHECK(matches("xxabc", "abc$", 1));
+  CHECK(matches("xxabcxx", "abc$", 0));
+
+  /* Alternation and grouping. */
+  CHECK(matches("cat", "cat|dog", 1));
+  CHECK(matches("dog", "cat|dog", 1));
+  CHECK(matches("cow", "cat|dog", 0));
+  CHECK(matches("abcabc", "(abc)+", 1));
+  CHECK(matches("abab", "^(ab)+$", 1));
+  CHECK(matches("ababa", "^(ab)+$", 0));
+
+  /* Repetition. */
+  CHECK(matches("", "a*", 1));
+  CHECK(matches("", "a+", 0));
+  CHECK(matches("aaa", "a+", 1));
+  CHECK(matches("b", "a?b", 1));
+  CHECK(matches("ab", "a?b", 1));
+
+  /* Classes, including ranges and negation. */
+  CHECK(matches("x7y", "[0-9]", 1));
+  CHECK(matches("xyz", "[0-9]", 0));
+  CHECK(matches("xyz", "[^0-9]", 1));
+  CHECK(matches("777", "[^0-9]", 0));
+  CHECK(matches("a-b", "[a\\-b]+", 1));
+  /* `.` does not cross a newline, as in the reference. */
+  CHECK(matches("a\nb", "a.b", 0));
+
+  /* Unsupported syntax is refused rather than silently mismatched: an
+   * operator that quietly answers "no" is a check that quietly passes. */
+  {
+    int got = 0;
+    CHECK(regex_match("aaa", "a{2,3}", &got) == BS_ERR_UNSUPPORTED);
+    CHECK(regex_match("a1", "\\d", &got) == BS_ERR_UNSUPPORTED);
+    /* Unbalanced parentheses and classes are malformed. */
+    CHECK(regex_match("a", "(a", &got) == BS_ERR_MALFORMED);
+    CHECK(regex_match("a", "a)", &got) == BS_ERR_MALFORMED);
+    CHECK(regex_match("a", "[a", &got) == BS_ERR_MALFORMED);
+  }
+}
+
+static void test_regex_is_not_exponential(void) {
+  /* `(a+)+b` against a run of a's with no b is the classic catastrophic
+   * backtracking case: a backtracking matcher explores exponentially many
+   * ways to split the a's and takes essentially forever.
+   *
+   * Both the pattern and the subject come out of a token, so this is not a
+   * theoretical concern -- it is a denial of service anyone holding a token
+   * could arrange. A Thompson simulation advances every thread in lockstep
+   * and answers in time proportional to pattern length times input length,
+   * so this returns immediately. That it returns at all is the test. */
+  CHECK(matches("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "(a+)+b", 0));
+  CHECK(matches("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab", "(a+)+b", 1));
+  CHECK(matches("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "(a|a|a)+b", 0));
+}
+
 int main(void) {
   test_comparison();
   test_equality();
@@ -962,5 +1057,7 @@ int main(void) {
   test_string_concat();
   test_set_algebra();
   test_evaluation_is_transient();
+  test_regex();
+  test_regex_is_not_exponential();
   return bs_test_finish();
 }

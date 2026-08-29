@@ -928,6 +928,17 @@ again:
       }
       break;
 
+    case 8U: /* .matches() */
+      if (a.kind != (uint8_t)BS_T_STRING || b.kind != (uint8_t)BS_T_STRING) {
+        st = BS_ERR_TYPE;
+        goto failed;
+      }
+      st = bs_re_match(e->syms, e->arena, a, b, &flag);
+      if (st == BS_OK) {
+        st = bs_push(e, bs_bool(flag));
+      }
+      break;
+
     case 6U: /* .starts_with() */
     case 7U: /* .ends_with() */
       st = bs_affix(e, a, b, (op->kind == 7U), &flag);

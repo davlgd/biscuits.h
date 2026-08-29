@@ -130,7 +130,8 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Wire to memory loader | done — facts, rules, checks, expressions, closures |
 | Scope resolution | done — trust sets computed at load, not at evaluation |
 | Datalog engine | in progress |
-| Expression evaluator | in progress — closures, short-circuiting, all/any, try_or done; string and set algebra remain |
+| Expression evaluator | done — every operator the samples exercise, closures included |
+| Regular expressions | done — Thompson simulation, linear on any input |
 | Datalog text parser | not started |
 | Authorizer | not started |
 | ECDSA secp256r1 | deferred to 1.1 |
@@ -147,8 +148,8 @@ tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         7182 lines
-object -Os    54976 bytes
+header         7943 lines
+object -Os    58496 bytes
 ```
 <!-- metrics:end -->
 

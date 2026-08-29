@@ -84,6 +84,11 @@ POINTER_ARITHMETIC_SITES = {
     "bs_put_string",
     "bs_symbol_get",
     "bs_scalar_is_canonical",  # walks the 32 bytes of a signature scalar
+    # The regex engine walks its pattern and its subject byte by byte; that is
+    # what a matcher is.
+    "bs_re_class",
+    "bs_re_tokenise",
+    "bs_re_search",
 }
 
 

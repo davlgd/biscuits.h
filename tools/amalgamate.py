@@ -42,6 +42,7 @@ PARTS = [
     "100_world.inc",
     "105_symtab.inc",
     "110_load.inc",
+    "125_regex.inc",
     "120_eval.inc",
     "99_epilogue.inc",
 ]
