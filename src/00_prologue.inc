@@ -41,8 +41,12 @@
  *                            with checked accessors. Raw pointer arithmetic
  *                            appears only inside bs_span itself.
  *
- *   5. No libc beyond memcpy, memcmp and memset. No stdio, no locale, no
- *                            string functions, no floating point.
+ *   5. Minimal libc.       memcpy, memcmp and memset, and nothing else --
+ *                            no stdio, no locale, no str* family, no floating
+ *                            point. Some toolchains lower memset(p, 0, n) to
+ *                            bzero, so an embedding target provides one or
+ *                            the other. Checked on the compiled object by
+ *                            tools/check_invariants.py, not asserted.
  *
  * Invariants 1-3 are the first three rules of the JPL "Power of Ten"; here
  * they are not imposed from outside, they are what the Biscuit threat model

@@ -11,8 +11,9 @@ decision.
 
 That is the whole attack surface. There is no network code, no file I/O, no
 formatted output, no locale handling, no threading, no floating point, and no
-dynamic linking. The three libc functions used are `memcpy`, `memcmp` and
-`memset`.
+dynamic linking. The only libc functions used are `memcpy`, `memcmp` and
+`memset` — verified by reading the undefined symbols off the compiled object,
+not by inspection. See `tools/check_invariants.py`.
 
 An attacker controls: the length and content of the token, the number and size
 of blocks, the shape and nesting of every Datalog term, the opcode sequence of
@@ -61,13 +62,22 @@ governed by the run limits the specification already defines (`maxFacts`,
 `maxIterations`, `maxTime`), so this rule costs nothing: the spec demands it
 anyway.
 
-### 4. No pointer arithmetic
+### 4. Pointer arithmetic is confined
 
 Byte ranges are `bs_span` — a pointer and a length — with checked accessors.
-Raw pointer arithmetic exists only inside `bs_span_slice`.
+Pointer arithmetic and raw indexing happen only inside a fixed, enumerated set
+of functions: the span and cursor accessors, the arena, and four places that
+walk bytes directly (`bs_pb_next`'s little-endian assembly, `bs_pb_pubkey`'s
+SEC1 prefix byte, and the writer's copy and hex loops).
+
+That list is not a description, it is a gate: it lives in
+`POINTER_ARITHMETIC_SITES` in `tools/check_invariants.py`, and a new site
+fails the build until someone adds it there deliberately.
 
 The point is not that checked accessors are individually safer. It is that
-when a fuzzer finds an out-of-bounds read, there is one function to look at.
+when a fuzzer finds an out-of-bounds read, the set of places it can have come
+from is small enough to read in one sitting — and small enough to be worth
+model-checking exhaustively.
 
 Lengths derived from input never use bare `+` or `*`. `bs_size_add` and
 `bs_size_mul` wrap `__builtin_*_overflow` and refuse to produce a wrapped
@@ -79,6 +89,38 @@ value. A silent wrap is how a bounds check becomes a no-op.
 be dropped into a kernel module, a WASM sandbox or bare-metal firmware without
 a shim — and it removes `printf` format strings, locale-dependent comparison,
 and the `str*` family's off-by-one folklore from the threat model entirely.
+
+Some toolchains lower `memset(p, 0, n)` to `bzero`, so an embedding target
+provides one or the other. That is stated because it is what the shipped
+object actually requires, and the check reads the object rather than the
+source.
+
+The `str*` family is absent by construction rather than by discipline. String
+lengths come from `sizeof` at compile time: a hand-written scan for the
+terminator is an idiom the optimiser recognises and rewrites into a call to
+`strlen`, which puts a `str*` function into the object while the source
+contains none. That is not hypothetical — it is what the first run of
+`tools/check_invariants.py` found, and why the check reads symbols instead of
+grepping code.
+
+## What is enforced, and how
+
+A claim in this file is either checked by a build target or labelled as review.
+There is no third category.
+
+| Invariant | Enforcement |
+|---|---|
+| 1. No allocation | `make invariants` — undefined symbols of the compiled object |
+| 2. No recursion | `make invariants` — cycle detection over the compiler's own call graph |
+| 3. Bounded loops | Review. Not mechanically checkable; the specification's run limits are the bound. |
+| 4. Pointer arithmetic confined | `make invariants` — pinned site list |
+| 5. Minimal libc | `make invariants` — undefined symbols of the compiled object |
+
+The symbol and call-graph checks run on `biscuits.h` as shipped, so they cover
+anything that reaches the artifact, including code introduced by a macro. The
+checker is itself tested against injected violations — direct recursion, mutual
+recursion, and a hidden `malloc` — because a checker that only ever passes is
+worth nothing.
 
 ## Relation to the Power of Ten
 
@@ -95,7 +137,7 @@ token library that cannot fail under attack want the same things.
 | 4. Functions fit on one page | Adopted as a guideline. The protobuf field dispatcher is a wide switch and is allowed to be long, because splitting it would scatter the wire format. |
 | 5. Two assertions per function | **Not** adopted as a count. Assertions state invariants; input validation returns a `bs_status`. A rule that rewards assertion count encourages asserting on attacker input, which is exactly wrong. |
 | 6. Smallest possible scope | Adopted. |
-| 7. Check every return value | Adopted, enforced by `-Wunused-result` and clang-tidy. |
+| 7. Check every return value | Adopted. Every public entry point carries `warn_unused_result` via `BS_MUST_USE`, so ignoring one is a build failure unless written as an explicit `(void)` cast. |
 | 8. Limited preprocessor | Adopted. Configuration macros and include guards only; no code-generating macros. |
 | 9. Restricted pointer use | Adopted. One level of dereference, no function pointers in the core. |
 | 10. All warnings on, multiple analysers | Adopted, and then some. See below. |
@@ -116,6 +158,14 @@ assert.
 The value of this split is that under the fuzzer every documented invariant
 becomes an oracle: the fuzzer does not only look for crashes, it looks for
 violated beliefs.
+
+The invariants currently asserted are: the cursor never advances past its span
+(`bs_cursor_left`, `bs_take_bytes`); an arena allocation lies wholly inside the
+buffer (`bs_arena_alloc`); the block index stays below the counted block count
+(`bs_token_parse`); and the printer's frame stack never exceeds its bound
+(`bs_term_print`). Each one is a fact the surrounding code has already
+established by other means, which is what makes it an oracle rather than a
+check.
 
 ## Compiler flags that are load-bearing
 

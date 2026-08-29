@@ -52,18 +52,15 @@ static void bs_put_byte(bs_writer *w, uint8_t b) {
   bs_put_span(w, bs_span_make(&b, 1U));
 }
 
-/* Literal text. The length is computed here rather than taken from the caller
- * so a mismatched sizeof can never walk off the end of a string constant. */
-static void bs_put_cstr(bs_writer *w, const char *s) {
-  size_t n = 0;
-  if (s == NULL) {
-    return;
-  }
-  while (s[n] != '\0') {
-    n++;
-  }
-  bs_put_span(w, bs_span_make(s, n));
-}
+/* Literal text, with its length taken at compile time.
+ *
+ * A scan for the terminator would be the obvious implementation and is the
+ * wrong one: clang recognises that loop and rewrites it into a call to
+ * strlen, which puts a str* function into the shipped object and breaks
+ * invariant 5. tools/check_invariants.py caught exactly that. sizeof cannot
+ * be rewritten into anything. */
+#define BS_PUT_LIT(w, lit)                                                     \
+  bs_put_span((w), bs_span_make((lit), sizeof(lit) - 1U))
 
 /* Signed decimal, INT64_MIN included.
  *
@@ -130,19 +127,19 @@ static void bs_put_string(bs_writer *w, bs_span s) {
     uint8_t c = s.p[i];
     switch (c) {
     case (uint8_t)'"':
-      bs_put_cstr(w, "\\\"");
+      BS_PUT_LIT(w, "\\\"");
       break;
     case (uint8_t)'\\':
-      bs_put_cstr(w, "\\\\");
+      BS_PUT_LIT(w, "\\\\");
       break;
     case (uint8_t)'\n':
-      bs_put_cstr(w, "\\n");
+      BS_PUT_LIT(w, "\\n");
       break;
     case (uint8_t)'\t':
-      bs_put_cstr(w, "\\t");
+      BS_PUT_LIT(w, "\\t");
       break;
     case (uint8_t)'\r':
-      bs_put_cstr(w, "\\r");
+      BS_PUT_LIT(w, "\\r");
       break;
     default:
       bs_put_byte(w, c);

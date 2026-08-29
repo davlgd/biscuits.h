@@ -47,3 +47,16 @@
 #ifndef BS_MAX_BLOCKS
 #define BS_MAX_BLOCKS 64
 #endif
+
+/* Every fallible entry point reports through its return value, so ignoring one
+ * silently is a bug rather than a style choice. Power of Ten rule 7 asks for
+ * exactly this; without the attribute the rule was a claim with nothing behind
+ * it. Deliberately discarding a result stays possible with an explicit (void)
+ * cast, which is the point: it has to be written down. */
+#ifndef BS_MUST_USE
+#if defined(__GNUC__) || defined(__clang__)
+#define BS_MUST_USE __attribute__((warn_unused_result))
+#else
+#define BS_MUST_USE
+#endif
+#endif

@@ -41,10 +41,15 @@ needed to be, so you can size it from a real workload instead of guessing.
 
 The reference implementation is [`biscuit-rust`](https://github.com/biscuit-auth/biscuit-rust),
 and it is the canonical one — this project does not compete for that role. But
-measured on this machine, its C API builds to a **2.8 MB** stripped shared
-library (17.7 MB static) from a graph of **79 crates**. That is a perfectly
-reasonable size for a server, and an impossible one for an nginx module, a
-Postgres extension, a Cortex-M firmware, or a browser tab.
+its C API builds to a **2.8 MB** stripped shared library (17.7 MB static) from
+a graph of **79 crates**. That is a perfectly reasonable size for a server, and
+an impossible one for an nginx module, a Postgres extension, a Cortex-M
+firmware, or a browser tab.
+
+Those three figures are reproducible: `tools/compare.sh` regenerates all of
+them and prints the revision, the toolchain and the target it measured on. A
+project whose argument is *measure, do not assert* has no business quoting
+numbers nobody else can check.
 
 So the gap is not quality, it is reach. `biscuits.h` aims to be the artifact
 you can put where the reference implementation cannot go — and, because a
@@ -54,16 +59,26 @@ drift apart.
 
 ## Design invariants
 
-These are enforced by CI, not by good intentions. Breaking one is a build
-failure.
+Four of the five are checked by `make invariants`, on the compiled artifact
+rather than on the source — so anything that reaches the shipped object is
+covered, including code introduced through a macro. The fifth is labelled as
+review, because it is not mechanically checkable and pretending otherwise
+would be the kind of claim this table exists to avoid.
 
-| # | Invariant | Why it matters |
-|---|---|---|
-| 1 | **No allocation.** All memory comes from a caller-provided arena, never freed piecewise. | Use-after-free and double-free become unreachable by construction — the bug class a borrow checker exists to prevent. |
-| 2 | **No recursion.** Nested terms and closures are walked with an explicit bounded stack. | Stack depth is a compile-time constant. Deep nesting returns `BS_ERR_DEPTH`, never a crash. |
-| 3 | **Bounded loops.** Every loop has a static or caller-supplied bound. | Datalog evaluation cannot be made to run forever by a hostile token. |
-| 4 | **No pointer arithmetic.** Byte ranges are `bs_span` with checked accessors. | Out-of-bounds access has exactly one place it can originate from. |
-| 5 | **No libc beyond `memcpy`, `memcmp`, `memset`.** | No stdio, no locale, no floating point. Usable in a kernel module or bare metal without a shim. |
+| # | Invariant | Why it matters | Enforcement |
+|---|---|---|---|
+| 1 | **No allocation.** All memory comes from a caller-provided arena, never freed piecewise. | Use-after-free and double-free become unreachable by construction — the bug class a borrow checker exists to prevent. | undefined symbols of the compiled object |
+| 2 | **No recursion.** Nested terms and closures are walked with an explicit bounded stack. | Stack depth is a compile-time constant. Deep nesting returns `BS_ERR_DEPTH`, never a crash. | cycle detection over the compiler's own call graph |
+| 3 | **Bounded loops.** Every loop has a static or caller-supplied bound. | Datalog evaluation cannot be made to run forever by a hostile token. | review |
+| 4 | **Pointer arithmetic is confined** to an enumerated set of accessors. | When a fuzzer finds an out-of-bounds read, the set of places it can have come from is small enough to read in one sitting. | pinned site list |
+| 5 | **No libc beyond `memcpy`, `memcmp`, `memset`.** | No stdio, no locale, no floating point. Usable in a kernel module or bare metal without a shim. | undefined symbols of the compiled object |
+
+The checker is itself tested against injected violations — direct recursion,
+mutual recursion, and a hidden `malloc` — because a checker that only ever
+passes is worth nothing. Its first run found two real breaches of invariant 5:
+the optimiser had rewritten a hand-written scan for a string terminator into a
+call to `strlen`, and `memset(p, 0, n)` into `bzero`. Neither appears anywhere
+in the source. That is why the check reads symbols instead of grepping code.
 
 Invariants 1–3 are the first three rules of the JPL/NASA
 [Power of Ten](https://spinroot.com/gerard/pdf/P10.pdf). They are not imposed
@@ -95,32 +110,41 @@ test cases is the wrong trade to make first. Everything else is in scope.
 
 | Component | State |
 |---|---|
-| Arena, spans, cursors | done, 118 assertions, ASan+UBSan clean |
-| Conformance harness | done, 4 tiers, 200 checks over 50 validations |
-| Base64url + protobuf decoder | not started |
+| Arena, spans, cursors | done |
+| Conformance harness | done — 4 tiers, 200 checks over 50 validations |
+| Protobuf wire decoder | done — **48/48** on the decode tier |
+| Token container decoder | done — **43/43** on the revocation-id tier |
+| Output writer and symbol table | done |
+| Term printer | done — recursion-free, depth-bounded |
+| Block decoder and Datalog printer | in progress — unlocks the `blocks` tier |
+| Base64url | not started |
 | Ed25519 verification | not started |
 | Datalog engine | not started |
 | Expression VM | not started |
-| Datalog text parser + printer | not started |
+| Datalog text parser | not started |
 | Authorizer | not started |
 | ECDSA secp256r1 | deferred to 1.1 |
 
-Measured on the current tree (`make size`):
+318 unit assertions, all sanitizer- and analyser-clean. Measured on the current
+tree — `make metrics` regenerates this block and CI fails if it drifts:
 
+<!-- metrics:begin -->
 ```
-header      550 lines
-object -Os  3440 bytes
+header         1934 lines
+object -Os    13728 bytes
 ```
+<!-- metrics:end -->
 
 ## Building
 
 ```sh
-make             # amalgamate, build, unit tests and conformance
+make             # amalgamate, build, test, conformance and invariants
 make conformance # the official spec suite, scored by tier
+make invariants  # the design invariants, checked on the compiled object
 make asan        # AddressSanitizer + UndefinedBehaviorSanitizer
-make lint        # amalgamation freshness, clang-format, clang-tidy, cppcheck
+make lint        # amalgamation, format, clang-tidy, cppcheck, invariants
 make analyze     # clang static analyzer
-make size        # the headline numbers
+make metrics     # regenerate the size figures in this file
 ```
 
 The conformance suite runs through a shim, so the same runner scores any

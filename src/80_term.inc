@@ -114,7 +114,7 @@ static int bs_term_step(bs_writer *w, const bs_symbols *sym, bs_span term,
       if (f.wire != BS_PB_BYTES || found++) {
         return 0;
       }
-      bs_put_cstr(w, "hex:");
+      BS_PUT_LIT(w, "hex:");
       bs_put_hex(w, f.bytes);
       result = 1;
       break;
@@ -127,14 +127,18 @@ static int bs_term_step(bs_writer *w, const bs_symbols *sym, bs_span term,
       if (f.varint > 1U) {
         return 0;
       }
-      bs_put_cstr(w, (f.varint != 0U) ? "true" : "false");
+      if (f.varint != 0U) {
+        BS_PUT_LIT(w, "true");
+      } else {
+        BS_PUT_LIT(w, "false");
+      }
       result = 1;
       break;
     case BS_F_TERM_NULL:
       if (f.wire != BS_PB_BYTES || found++) {
         return 0;
       }
-      bs_put_cstr(w, "null");
+      BS_PUT_LIT(w, "null");
       result = 1;
       break;
     case BS_F_TERM_SET:
@@ -260,7 +264,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
     }
 
     if (f->emitted++ > 0) {
-      bs_put_cstr(w, ", ");
+      BS_PUT_LIT(w, ", ");
     }
 
     value = item.bytes;
@@ -272,7 +276,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
       if (!bs_mapkey_print(w, sym, key)) {
         return BS_ERR_MALFORMED;
       }
-      bs_put_cstr(w, ": ");
+      BS_PUT_LIT(w, ": ");
     }
 
     step = bs_term_step(w, sym, value, &kind, &inner);
@@ -285,6 +289,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
          * stack -- which is the whole point of not recursing. */
         return BS_ERR_DEPTH;
       }
+      BS_ASSERT(depth < (size_t)BS_MAX_DEPTH);
       bs_put_open(w, kind);
       stack[depth].c = bs_cursor_make(inner);
       stack[depth].kind = kind;

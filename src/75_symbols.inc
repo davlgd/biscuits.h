@@ -18,24 +18,30 @@
  * inside tokens that already exist. */
 #define BS_SYMBOL_OFFSET 1024U
 
-static const char *const BS_DEFAULT_SYMBOLS[] = {
-    "read",    "write",     "resource", "operation", "right",   "time",
-    "role",    "owner",     "tenant",   "namespace", "user",    "team",
-    "service", "admin",     "email",    "group",     "member",  "ip_address",
-    "client",  "client_ip", "domain",   "path",      "version", "cluster",
-    "node",    "hostname",  "nonce",    "query",
+/* Text and length together: a length taken by scanning for the terminator
+ * compiles down to a call to strlen, which invariant 5 forbids. */
+typedef struct bs_static_symbol {
+  const char *text;
+  size_t len;
+} bs_static_symbol;
+
+#define BS_SYM(s) {s, sizeof(s) - 1U}
+
+static const bs_static_symbol BS_DEFAULT_SYMBOLS[] = {
+    BS_SYM("read"),      BS_SYM("write"),     BS_SYM("resource"),
+    BS_SYM("operation"), BS_SYM("right"),     BS_SYM("time"),
+    BS_SYM("role"),      BS_SYM("owner"),     BS_SYM("tenant"),
+    BS_SYM("namespace"), BS_SYM("user"),      BS_SYM("team"),
+    BS_SYM("service"),   BS_SYM("admin"),     BS_SYM("email"),
+    BS_SYM("group"),     BS_SYM("member"),    BS_SYM("ip_address"),
+    BS_SYM("client"),    BS_SYM("client_ip"), BS_SYM("domain"),
+    BS_SYM("path"),      BS_SYM("version"),   BS_SYM("cluster"),
+    BS_SYM("node"),      BS_SYM("hostname"),  BS_SYM("nonce"),
+    BS_SYM("query"),
 };
 
 #define BS_DEFAULT_SYMBOL_COUNT                                                \
   (sizeof BS_DEFAULT_SYMBOLS / sizeof BS_DEFAULT_SYMBOLS[0])
-
-static size_t bs_cstr_len(const char *s) {
-  size_t n = 0;
-  while (s[n] != '\0') {
-    n++;
-  }
-  return n;
-}
 
 BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out) {
   if (out == NULL) {
@@ -43,7 +49,7 @@ BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out) {
   }
 
   if (index < BS_SYMBOL_OFFSET) {
-    const char *text;
+    const bs_static_symbol *entry;
     if (index >= (uint64_t)BS_DEFAULT_SYMBOL_COUNT) {
       /* An index inside the reserved range but past the list this build
        * knows. A future specification may define it; this one cannot print
@@ -51,8 +57,8 @@ BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out) {
        * than everywhere else. */
       return 0;
     }
-    text = BS_DEFAULT_SYMBOLS[(size_t)index];
-    *out = bs_span_make(text, bs_cstr_len(text));
+    entry = &BS_DEFAULT_SYMBOLS[(size_t)index];
+    *out = bs_span_make(entry->text, entry->len);
     return 1;
   }
 

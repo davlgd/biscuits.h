@@ -19,8 +19,7 @@ typedef enum bs_status {
   BS_OK = 0,
   BS_ERR_ARGUMENT,    /* caller passed a null or nonsensical argument */
   BS_ERR_NOMEM,       /* the caller-provided arena is exhausted */
-  BS_ERR_TRUNCATED,   /* input ended in the middle of a structure */
-  BS_ERR_MALFORMED,   /* input violates the wire format */
+  BS_ERR_MALFORMED,   /* input violates the wire format, truncation included */
   BS_ERR_DEPTH,       /* nesting deeper than BS_MAX_DEPTH */
   BS_ERR_OVERFLOW,    /* an arithmetic operation overflowed */
   BS_ERR_LIMIT,       /* a configured evaluation limit was reached */
@@ -31,7 +30,7 @@ typedef enum bs_status {
 
 /* Short, stable, allocation-free description. Never NULL, even for a value
  * outside the enum -- a corrupted status must not become a crash. */
-BS_API const char *bs_strstatus(bs_status st);
+BS_API BS_MUST_USE const char *bs_strstatus(bs_status st);
 
 /* ---------------------------------------------------------------------------
  * Byte ranges
@@ -50,16 +49,17 @@ typedef struct bs_span {
   size_t n;
 } bs_span;
 
-BS_API bs_span bs_span_make(const void *p, size_t n);
+BS_API BS_MUST_USE bs_span bs_span_make(const void *p, size_t n);
 
 /* Byte at index i. Returns 0 and leaves *out untouched if i is out of range. */
-BS_API int bs_span_at(bs_span s, size_t i, uint8_t *out);
+BS_API BS_MUST_USE int bs_span_at(bs_span s, size_t i, uint8_t *out);
 
 /* Sub-range [off, off+len). Returns 0 on any overflow or overrun. */
-BS_API int bs_span_slice(bs_span s, size_t off, size_t len, bs_span *out);
+BS_API BS_MUST_USE int bs_span_slice(bs_span s, size_t off, size_t len,
+                                     bs_span *out);
 
 /* Content equality. Two empty spans are equal regardless of their pointers. */
-BS_API int bs_span_eq(bs_span a, bs_span b);
+BS_API BS_MUST_USE int bs_span_eq(bs_span a, bs_span b);
 
 /* ---------------------------------------------------------------------------
  * Cursor
@@ -76,12 +76,12 @@ typedef struct bs_cursor {
   size_t off;
 } bs_cursor;
 
-BS_API bs_cursor bs_cursor_make(bs_span s);
-BS_API size_t bs_cursor_left(const bs_cursor *c);
-BS_API int bs_cursor_done(const bs_cursor *c);
+BS_API BS_MUST_USE bs_cursor bs_cursor_make(bs_span s);
+BS_API BS_MUST_USE size_t bs_cursor_left(const bs_cursor *c);
+BS_API BS_MUST_USE int bs_cursor_done(const bs_cursor *c);
 
-BS_API int bs_take_u8(bs_cursor *c, uint8_t *out);
-BS_API int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out);
+BS_API BS_MUST_USE int bs_take_u8(bs_cursor *c, uint8_t *out);
+BS_API BS_MUST_USE int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out);
 
 /* ---------------------------------------------------------------------------
  * Arena
@@ -115,23 +115,29 @@ typedef union bs_max_align {
 #define BS_ALIGN_MAX (sizeof(bs_max_align))
 
 /* buf may be NULL only if cap is 0, which yields an arena that fails every
- * allocation -- useful for measuring how much memory a workload would need. */
-BS_API bs_status bs_arena_init(bs_arena *a, void *buf, size_t cap);
+ * allocation -- useful for measuring how much memory a workload would need.
+ *
+ * A misaligned buffer is accepted: the leading pad is absorbed and the usable
+ * capacity shrinks accordingly, so carving an arena out of a larger buffer is
+ * safe. On a target without uintptr_t the base cannot be inspected portably
+ * and the caller must supply a BS_ALIGN_MAX-aligned buffer. */
+BS_API BS_MUST_USE bs_status bs_arena_init(bs_arena *a, void *buf, size_t cap);
 
 /* align must be a power of two and at most BS_ALIGN_MAX. Returns NULL on
  * exhaustion, on overflow, or if the arena has already failed. */
-BS_API void *bs_arena_alloc(bs_arena *a, size_t size, size_t align);
+BS_API BS_MUST_USE void *bs_arena_alloc(bs_arena *a, size_t size, size_t align);
 
 /* Zero-initialised array of n elements of the given size. Guards the
  * multiplication; a hostile count cannot wrap into a small allocation. */
-BS_API void *bs_arena_array(bs_arena *a, size_t n, size_t size, size_t align);
+BS_API BS_MUST_USE void *bs_arena_array(bs_arena *a, size_t n, size_t size,
+                                        size_t align);
 
 /* Rewind to empty. Keeps the peak, clears the failure flag. */
 BS_API void bs_arena_reset(bs_arena *a);
 
-BS_API size_t bs_arena_used(const bs_arena *a);
-BS_API size_t bs_arena_peak(const bs_arena *a);
-BS_API int bs_arena_failed(const bs_arena *a);
+BS_API BS_MUST_USE size_t bs_arena_used(const bs_arena *a);
+BS_API BS_MUST_USE size_t bs_arena_peak(const bs_arena *a);
+BS_API BS_MUST_USE int bs_arena_failed(const bs_arena *a);
 
 /* ---------------------------------------------------------------------------
  * Tokens
@@ -177,11 +183,13 @@ typedef struct bs_token {
  * Returns BS_ERR_UNSUPPORTED for a token whose keys use an algorithm this
  * build does not implement, so an unverifiable token can never be confused
  * with a verified one. */
-BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out);
+BS_API BS_MUST_USE bs_status bs_token_parse(bs_arena *a, bs_span input,
+                                            bs_token *out);
 
 /* The revocation identifier of a block: its signature, verbatim. Returns an
  * empty span for an out-of-range index. */
-BS_API bs_span bs_token_revocation_id(const bs_token *t, size_t index);
+BS_API BS_MUST_USE bs_span bs_token_revocation_id(const bs_token *t,
+                                                  size_t index);
 
 /* ---------------------------------------------------------------------------
  * Output writer
@@ -198,9 +206,10 @@ typedef struct bs_writer {
   int overflow;
 } bs_writer;
 
-BS_API bs_status bs_writer_init(bs_writer *w, void *buf, size_t cap);
-BS_API int bs_writer_overflow(const bs_writer *w);
-BS_API size_t bs_writer_len(const bs_writer *w);
+BS_API BS_MUST_USE bs_status bs_writer_init(bs_writer *w, void *buf,
+                                            size_t cap);
+BS_API BS_MUST_USE int bs_writer_overflow(const bs_writer *w);
+BS_API BS_MUST_USE size_t bs_writer_len(const bs_writer *w);
 
 /* ---------------------------------------------------------------------------
  * Symbol table
@@ -220,10 +229,11 @@ typedef struct bs_symbols {
 /* Resolve an index to its text. Returns 0 for an index this build cannot
  * name, which includes a reserved index a future specification may define --
  * guessing would make the token read differently here than elsewhere. */
-BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out);
+BS_API BS_MUST_USE int bs_symbol_get(const bs_symbols *s, uint64_t index,
+                                     bs_span *out);
 
 /* How many well-known symbols this build knows. */
-BS_API size_t bs_symbol_default_count(void);
+BS_API BS_MUST_USE size_t bs_symbol_default_count(void);
 
 /* ---------------------------------------------------------------------------
  * Datalog rendering
@@ -237,5 +247,5 @@ BS_API size_t bs_symbol_default_count(void);
  *
  * On any error the bytes already written to `w` are undefined: the caller
  * discards the whole rendering, never a prefix of it. */
-BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
-                               bs_span term);
+BS_API BS_MUST_USE bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
+                                           bs_span term);

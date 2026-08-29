@@ -47,10 +47,10 @@ static void test_writer_overflow_is_sticky(void) {
   bs_writer w;
 
   CHECK(bs_writer_init(&w, small, sizeof small) == BS_OK);
-  bs_put_cstr(&w, "abcd");
+  BS_PUT_LIT(&w, "abcd");
   CHECK(!bs_writer_overflow(&w) && bs_writer_len(&w) == 4U); /* exact fit */
 
-  bs_put_cstr(&w, "e");
+  BS_PUT_LIT(&w, "e");
   CHECK(bs_writer_overflow(&w));
   CHECK(bs_writer_len(&w) == 4U); /* nothing was written past the end */
 
@@ -62,7 +62,7 @@ static void test_writer_overflow_is_sticky(void) {
 
   /* A zero-capacity writer measures demand without writing anything. */
   CHECK(bs_writer_init(&w, NULL, 0U) == BS_OK);
-  bs_put_cstr(&w, "anything");
+  BS_PUT_LIT(&w, "anything");
   CHECK(bs_writer_overflow(&w) && bs_writer_len(&w) == 0U);
 
   CHECK(bs_writer_init(&w, NULL, 4U) == BS_ERR_ARGUMENT);

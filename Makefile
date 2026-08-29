@@ -62,7 +62,11 @@ CFLAGS_RELEASE := $(CFLAGS_COMMON) -O2 $(HARDEN)
 CFLAGS_SIZE    := $(CFLAGS_COMMON) -Os $(HARDEN)
 CFLAGS_DEBUG   := $(CFLAGS_COMMON) -O0 -g
 
-SAN_COMMON := -O1 -g -fno-omit-frame-pointer -fno-sanitize-recover=all
+# Sanitizers run at two optimisation levels. -O1 is the fast pass; -O0 exists
+# because the optimiser can fold an over-read into a wider load, or delete it
+# entirely, before the sanitizer ever sees it -- so a clean -O1 run is not
+# evidence of a clean -O0 one.
+SAN_COMMON := -g -fno-omit-frame-pointer -fno-sanitize-recover=all
 CFLAGS_ASAN := $(CFLAGS_COMMON) $(SAN_COMMON) -fsanitize=address,undefined
 CFLAGS_MSAN := $(CFLAGS_COMMON) $(SAN_COMMON) -fsanitize=memory \
                -fsanitize-memory-track-origins=2
@@ -84,7 +88,7 @@ SHIM_SRC    := tests/conformance/shim.c
 ALL_C       := $(UNIT_SRCS) $(SHIM_SRC)
 
 .PHONY: all
-all: $(HEADER) test
+all: $(HEADER) test invariants
 
 # ---------------------------------------------------------------------------
 # Amalgamation
@@ -108,7 +112,7 @@ check-amalgamation:
 # Tests
 # ---------------------------------------------------------------------------
 .PHONY: test
-test: unit conformance
+test: unit conformance portable
 
 .PHONY: unit
 unit: $(UNIT_BINS)
@@ -140,10 +144,12 @@ conformance: $(CONFORMANCE_SHIM)
 # ---------------------------------------------------------------------------
 .PHONY: asan
 asan: $(HEADER) | $(BUILD)
-	@fail=0; for s in $(UNIT_SRCS); do \
-	    b=$(BUILD)/asan_$$(basename $$s .c); \
-	    $(CC) $(CFLAGS_ASAN) $$s -o $$b || exit 1; \
-	    ./$$b || fail=1; \
+	@fail=0; for o in -O0 -O1; do \
+	  for s in $(UNIT_SRCS); do \
+	    b=$(BUILD)/asan$$o_$$(basename $$s .c); \
+	    $(CC) $(CFLAGS_ASAN) $$o $$s -o $$b || exit 1; \
+	    ./$$b >/dev/null || fail=1; \
+	  done; \
 	done; exit $$fail
 
 # MSan needs a real libclang_rt and a Linux target: it is unsupported on
@@ -153,12 +159,22 @@ msan: $(HEADER) | $(BUILD)
 ifeq ($(UNAME_S),Linux)
 	@fail=0; for s in $(UNIT_SRCS); do \
 	    b=$(BUILD)/msan_$$(basename $$s .c); \
-	    $(CLANG) $(CFLAGS_MSAN) $$s -o $$b || exit 1; \
+	    $(CLANG) $(CFLAGS_MSAN) -O1 $$s -o $$b || exit 1; \
 	    ./$$b || fail=1; \
 	done; exit $$fail
 else
 	@echo "  SKIP  msan: unsupported on $(UNAME_S) (Linux CI job covers it)"
 endif
+
+# The portable arithmetic path is dead code on every compiler we test with,
+# which is exactly how it rots. This builds the whole suite against it.
+.PHONY: portable
+portable: $(HEADER) | $(BUILD)
+	@fail=0; for s in $(UNIT_SRCS); do \
+	    b=$(BUILD)/portable_$$(basename $$s .c); \
+	    $(CC) $(CFLAGS_DEBUG) -DBS_NO_OVERFLOW_BUILTINS $$s -o $$b || exit 1; \
+	    ./$$b >/dev/null || fail=1; \
+	done; exit $$fail
 
 # ---------------------------------------------------------------------------
 # Static analysis
@@ -169,8 +185,10 @@ tidy: $(HEADER)
 
 .PHONY: cppcheck
 cppcheck: $(HEADER)
+# --language=c is required: cppcheck does not recognise the .inc extension and
+# would otherwise analyse zero files from src/ while still exiting 0.
 	@cppcheck --std=c99 --enable=all --inconclusive --error-exitcode=1 \
-	    --check-level=exhaustive --inline-suppr \
+	    --check-level=exhaustive --inline-suppr --language=c \
 	    --suppress=missingIncludeSystem \
 	    --suppress=unusedFunction \
 	    --suppress=unmatchedSuppression \
@@ -184,8 +202,14 @@ analyze: $(HEADER) | $(BUILD)
 	        -c $$f -o $(BUILD)/$$(basename $$f .c).analyze.o || exit 1; \
 	done
 
+# The five invariants, checked on the compiled artifact rather than asserted
+# in the README. See tools/check_invariants.py for what is and is not proved.
+.PHONY: invariants
+invariants: $(HEADER)
+	@$(PYTHON) tools/check_invariants.py --cc $(CLANG)
+
 .PHONY: lint
-lint: check-amalgamation format-check tidy cppcheck
+lint: check-amalgamation format-check tidy cppcheck invariants check-metrics
 
 .PHONY: format
 format:
@@ -196,15 +220,23 @@ format-check:
 	@$(LLVM_BIN)clang-format --dry-run --Werror src/*.inc $(ALL_C)
 
 # ---------------------------------------------------------------------------
-# Size report -- the headline number, so it is measured, not estimated.
+# Measurements
 # ---------------------------------------------------------------------------
+# One measurement path, so the figure in README.md and the figure a developer
+# sees are the same number. Plain -Os without the hardening flags: that is what
+# a project embedding the header gets by default.
 .PHONY: size
-size: $(HEADER) | $(BUILD)
-	@echo '#define BISCUITS_IMPLEMENTATION' > $(BUILD)/size.c
-	@echo '#include "biscuits.h"' >> $(BUILD)/size.c
-	@$(CC) $(CFLAGS_SIZE) -c $(BUILD)/size.c -o $(BUILD)/size.o
-	@printf "  header      %s lines\n" "$$(wc -l < $(HEADER) | tr -d ' ')"
-	@printf "  object -Os  %s bytes\n" "$$(wc -c < $(BUILD)/size.o | tr -d ' ')"
+size: $(HEADER)
+	@$(PYTHON) tools/metrics.py --cc $(CC)
+
+# The headline numbers live in README.md and are regenerated, never typed.
+.PHONY: metrics
+metrics: $(HEADER)
+	@$(PYTHON) tools/metrics.py --cc $(CC) --write
+
+.PHONY: check-metrics
+check-metrics: $(HEADER)
+	@$(PYTHON) tools/metrics.py --cc $(CC) --check
 
 .PHONY: clean
 clean:

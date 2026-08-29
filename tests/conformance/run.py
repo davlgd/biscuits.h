@@ -46,29 +46,46 @@ DECODE_FAILURE_KINDS = frozenset({"format"})
 # forced to reproduce another language's struct shapes, so both sides speak
 # this canonical vocabulary instead. It is derived from the specification, not
 # from any implementation.
+class UnknownExpectation(Exception):
+    """The sample file used an error the runner has no canonical name for."""
+
+
+# Derived from the specification's error taxonomy, not from any one
+# implementation's enum. Adding a row is a deliberate act; meeting a pair that
+# is not here is a runner failure, never a silently-scored pass.
+ERROR_KINDS = {
+    ("Format", "Signature"): "signature",
+    ("Format", "InvalidSignatureSize"): "format",
+    ("Format", "BlockSignatureDeserializationError"): "format",
+    ("Format", "BlockDeserializationError"): "format",
+    ("Format", "DeserializationError"): "format",
+    ("Format", "InvalidKeySize"): "format",
+    ("Format", "InvalidKey"): "format",
+    ("Format", "UnknownPublicKey"): "format",
+    ("Format", "Version"): "format",
+    ("FailedLogic", "Unauthorized"): "unauthorized",
+    ("FailedLogic", "InvalidBlockRule"): "invalid_block_rule",
+    ("FailedLogic", "NoMatchingPolicy"): "no_matching_policy",
+    ("Execution", "Overflow"): "overflow",
+    ("Execution", "ShadowedVariable"): "shadowed_variable",
+    ("Execution", "InvalidType"): "invalid_type",
+    ("Execution", "Timeout"): "timeout",
+    ("Execution", "TooManyFacts"): "too_many_facts",
+    ("Execution", "TooManyIterations"): "too_many_iterations",
+}
+
+
 def canonical_error(err: dict) -> str:
     """Map one `result.Err` object from samples.json to a canonical kind."""
     if not isinstance(err, dict) or len(err) != 1:
-        return "unknown"
+        raise UnknownExpectation(repr(err)[:80])
     family, body = next(iter(err.items()))
     inner = next(iter(body)) if isinstance(body, dict) and body else body
 
-    return {
-        ("Format", "Signature"): "signature",
-        ("Format", "InvalidSignatureSize"): "format",
-        ("Format", "BlockSignatureDeserializationError"): "format",
-        ("Format", "BlockDeserializationError"): "format",
-        ("Format", "DeserializationError"): "format",
-        ("FailedLogic", "Unauthorized"): "unauthorized",
-        ("FailedLogic", "InvalidBlockRule"): "invalid_block_rule",
-        ("FailedLogic", "NoMatchingPolicy"): "no_matching_policy",
-        ("Execution", "Overflow"): "overflow",
-        ("Execution", "ShadowedVariable"): "shadowed_variable",
-        ("Execution", "InvalidType"): "invalid_type",
-        ("Execution", "Timeout"): "timeout",
-        ("Execution", "TooManyFacts"): "too_many_facts",
-        ("Execution", "TooManyIterations"): "too_many_iterations",
-    }.get((family, inner), f"{family}/{inner}".lower())
+    kind = ERROR_KINDS.get((family, inner))
+    if kind is None:
+        raise UnknownExpectation(f"{family}/{inner}")
+    return kind
 
 
 def expected_outcome(validation: dict) -> dict:
@@ -225,8 +242,18 @@ def main() -> int:
         actual = shim.evaluate(token, root_key, validation["authorizer_code"])
         label = f"{tc['filename']}[{vname or 'default'}]"
 
+        try:
+            outcome = expected_outcome(validation)
+        except UnknownExpectation as exc:
+            n += 1
+            print(f"not ok {n} - {label} # runner does not know the expected "
+                  f"error {exc}; add it to ERROR_KINDS")
+            for t in TIERS:
+                tally[t][1] += 1
+            continue
+
         expected = {
-            "outcome": expected_outcome(validation),
+            "outcome": outcome,
             "revocation_ids": validation["revocation_ids"],
             "blocks": [b.get("code", "") for b in tc["token"]],
         }

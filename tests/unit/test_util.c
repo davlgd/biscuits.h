@@ -190,6 +190,46 @@ static void test_arena_array_guards_multiplication(void) {
   CHECK(bs_arena_array(&a, SIZE_MAX, SIZE_MAX, 8U) == NULL);
 }
 
+static void test_arena_realigns_a_misaligned_base(void) {
+  /* An arena carved out of a larger buffer -- bs_arena_init(&a, buf + used,
+   * n) -- is the ordinary case, and nothing makes `used` a multiple of the
+   * alignment. bs_arena_alloc aligns the offset, so without normalising the
+   * base here every pointer it returns would inherit the misalignment. */
+  static uint8_t backing[256];
+  size_t skew;
+
+  for (skew = 0U; skew < 2U * BS_ALIGN_MAX; skew++) {
+    bs_arena a;
+    const void *p;
+    CHECK(bs_arena_init(&a, backing + skew, sizeof backing - skew) == BS_OK);
+    p = bs_arena_alloc(&a, sizeof(bs_max_align), BS_ALIGN_MAX);
+    CHECK(p != NULL);
+    CHECK(((uintptr_t)p % BS_ALIGN_MAX) == 0U);
+  }
+
+  /* A buffer too small to survive its own padding yields an arena that fails
+   * every allocation, rather than a short one that looks usable. */
+  {
+    bs_arena a;
+    CHECK(bs_arena_init(&a, backing + 1U, 2U) == BS_OK);
+    CHECK(bs_arena_alloc(&a, 1U, BS_ALIGN_MAX) == NULL);
+  }
+}
+
+static void test_slice_of_an_empty_span_forms_no_null_arithmetic(void) {
+  /* NULL + 0 is undefined in C99, however harmless it looks, and this library
+   * claims C99. UBSan's pointer-overflow check catches it. */
+  bs_span empty = bs_span_make(NULL, 0U);
+  bs_span sub;
+  bs_cursor c = bs_cursor_make(empty);
+  bs_span taken;
+
+  CHECK(bs_span_slice(empty, 0U, 0U, &sub));
+  CHECK(sub.n == 0U && sub.p == NULL);
+  CHECK(bs_take_bytes(&c, 0U, &taken));
+  CHECK(taken.n == 0U && taken.p == NULL);
+}
+
 int main(void) {
   test_status_strings();
   test_span_basics();
@@ -199,5 +239,7 @@ int main(void) {
   test_arena_exhaustion_is_sticky();
   test_arena_hostile_arguments();
   test_arena_array_guards_multiplication();
+  test_arena_realigns_a_misaligned_base();
+  test_slice_of_an_empty_span_forms_no_null_arithmetic();
   return bs_test_finish();
 }

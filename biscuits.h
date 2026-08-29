@@ -41,8 +41,12 @@
  *                            with checked accessors. Raw pointer arithmetic
  *                            appears only inside bs_span itself.
  *
- *   5. No libc beyond memcpy, memcmp and memset. No stdio, no locale, no
- *                            string functions, no floating point.
+ *   5. Minimal libc.       memcpy, memcmp and memset, and nothing else --
+ *                            no stdio, no locale, no str* family, no floating
+ *                            point. Some toolchains lower memset(p, 0, n) to
+ *                            bzero, so an embedding target provides one or
+ *                            the other. Checked on the compiled object by
+ *                            tools/check_invariants.py, not asserted.
  *
  * Invariants 1-3 are the first three rules of the JPL "Power of Ten"; here
  * they are not imposed from outside, they are what the Biscuit threat model
@@ -123,6 +127,19 @@ extern "C" {
 #define BS_MAX_BLOCKS 64
 #endif
 
+/* Every fallible entry point reports through its return value, so ignoring one
+ * silently is a bug rather than a style choice. Power of Ten rule 7 asks for
+ * exactly this; without the attribute the rule was a claim with nothing behind
+ * it. Deliberately discarding a result stays possible with an explicit (void)
+ * cast, which is the point: it has to be written down. */
+#ifndef BS_MUST_USE
+#if defined(__GNUC__) || defined(__clang__)
+#define BS_MUST_USE __attribute__((warn_unused_result))
+#else
+#define BS_MUST_USE
+#endif
+#endif
+
 /* ===========================================================================
  * 20_api.inc
  * ======================================================================== */
@@ -148,8 +165,7 @@ typedef enum bs_status {
   BS_OK = 0,
   BS_ERR_ARGUMENT,    /* caller passed a null or nonsensical argument */
   BS_ERR_NOMEM,       /* the caller-provided arena is exhausted */
-  BS_ERR_TRUNCATED,   /* input ended in the middle of a structure */
-  BS_ERR_MALFORMED,   /* input violates the wire format */
+  BS_ERR_MALFORMED,   /* input violates the wire format, truncation included */
   BS_ERR_DEPTH,       /* nesting deeper than BS_MAX_DEPTH */
   BS_ERR_OVERFLOW,    /* an arithmetic operation overflowed */
   BS_ERR_LIMIT,       /* a configured evaluation limit was reached */
@@ -160,7 +176,7 @@ typedef enum bs_status {
 
 /* Short, stable, allocation-free description. Never NULL, even for a value
  * outside the enum -- a corrupted status must not become a crash. */
-BS_API const char *bs_strstatus(bs_status st);
+BS_API BS_MUST_USE const char *bs_strstatus(bs_status st);
 
 /* ---------------------------------------------------------------------------
  * Byte ranges
@@ -179,16 +195,17 @@ typedef struct bs_span {
   size_t n;
 } bs_span;
 
-BS_API bs_span bs_span_make(const void *p, size_t n);
+BS_API BS_MUST_USE bs_span bs_span_make(const void *p, size_t n);
 
 /* Byte at index i. Returns 0 and leaves *out untouched if i is out of range. */
-BS_API int bs_span_at(bs_span s, size_t i, uint8_t *out);
+BS_API BS_MUST_USE int bs_span_at(bs_span s, size_t i, uint8_t *out);
 
 /* Sub-range [off, off+len). Returns 0 on any overflow or overrun. */
-BS_API int bs_span_slice(bs_span s, size_t off, size_t len, bs_span *out);
+BS_API BS_MUST_USE int bs_span_slice(bs_span s, size_t off, size_t len,
+                                     bs_span *out);
 
 /* Content equality. Two empty spans are equal regardless of their pointers. */
-BS_API int bs_span_eq(bs_span a, bs_span b);
+BS_API BS_MUST_USE int bs_span_eq(bs_span a, bs_span b);
 
 /* ---------------------------------------------------------------------------
  * Cursor
@@ -205,12 +222,12 @@ typedef struct bs_cursor {
   size_t off;
 } bs_cursor;
 
-BS_API bs_cursor bs_cursor_make(bs_span s);
-BS_API size_t bs_cursor_left(const bs_cursor *c);
-BS_API int bs_cursor_done(const bs_cursor *c);
+BS_API BS_MUST_USE bs_cursor bs_cursor_make(bs_span s);
+BS_API BS_MUST_USE size_t bs_cursor_left(const bs_cursor *c);
+BS_API BS_MUST_USE int bs_cursor_done(const bs_cursor *c);
 
-BS_API int bs_take_u8(bs_cursor *c, uint8_t *out);
-BS_API int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out);
+BS_API BS_MUST_USE int bs_take_u8(bs_cursor *c, uint8_t *out);
+BS_API BS_MUST_USE int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out);
 
 /* ---------------------------------------------------------------------------
  * Arena
@@ -244,23 +261,29 @@ typedef union bs_max_align {
 #define BS_ALIGN_MAX (sizeof(bs_max_align))
 
 /* buf may be NULL only if cap is 0, which yields an arena that fails every
- * allocation -- useful for measuring how much memory a workload would need. */
-BS_API bs_status bs_arena_init(bs_arena *a, void *buf, size_t cap);
+ * allocation -- useful for measuring how much memory a workload would need.
+ *
+ * A misaligned buffer is accepted: the leading pad is absorbed and the usable
+ * capacity shrinks accordingly, so carving an arena out of a larger buffer is
+ * safe. On a target without uintptr_t the base cannot be inspected portably
+ * and the caller must supply a BS_ALIGN_MAX-aligned buffer. */
+BS_API BS_MUST_USE bs_status bs_arena_init(bs_arena *a, void *buf, size_t cap);
 
 /* align must be a power of two and at most BS_ALIGN_MAX. Returns NULL on
  * exhaustion, on overflow, or if the arena has already failed. */
-BS_API void *bs_arena_alloc(bs_arena *a, size_t size, size_t align);
+BS_API BS_MUST_USE void *bs_arena_alloc(bs_arena *a, size_t size, size_t align);
 
 /* Zero-initialised array of n elements of the given size. Guards the
  * multiplication; a hostile count cannot wrap into a small allocation. */
-BS_API void *bs_arena_array(bs_arena *a, size_t n, size_t size, size_t align);
+BS_API BS_MUST_USE void *bs_arena_array(bs_arena *a, size_t n, size_t size,
+                                        size_t align);
 
 /* Rewind to empty. Keeps the peak, clears the failure flag. */
 BS_API void bs_arena_reset(bs_arena *a);
 
-BS_API size_t bs_arena_used(const bs_arena *a);
-BS_API size_t bs_arena_peak(const bs_arena *a);
-BS_API int bs_arena_failed(const bs_arena *a);
+BS_API BS_MUST_USE size_t bs_arena_used(const bs_arena *a);
+BS_API BS_MUST_USE size_t bs_arena_peak(const bs_arena *a);
+BS_API BS_MUST_USE int bs_arena_failed(const bs_arena *a);
 
 /* ---------------------------------------------------------------------------
  * Tokens
@@ -306,11 +329,13 @@ typedef struct bs_token {
  * Returns BS_ERR_UNSUPPORTED for a token whose keys use an algorithm this
  * build does not implement, so an unverifiable token can never be confused
  * with a verified one. */
-BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out);
+BS_API BS_MUST_USE bs_status bs_token_parse(bs_arena *a, bs_span input,
+                                            bs_token *out);
 
 /* The revocation identifier of a block: its signature, verbatim. Returns an
  * empty span for an out-of-range index. */
-BS_API bs_span bs_token_revocation_id(const bs_token *t, size_t index);
+BS_API BS_MUST_USE bs_span bs_token_revocation_id(const bs_token *t,
+                                                  size_t index);
 
 /* ---------------------------------------------------------------------------
  * Output writer
@@ -327,9 +352,10 @@ typedef struct bs_writer {
   int overflow;
 } bs_writer;
 
-BS_API bs_status bs_writer_init(bs_writer *w, void *buf, size_t cap);
-BS_API int bs_writer_overflow(const bs_writer *w);
-BS_API size_t bs_writer_len(const bs_writer *w);
+BS_API BS_MUST_USE bs_status bs_writer_init(bs_writer *w, void *buf,
+                                            size_t cap);
+BS_API BS_MUST_USE int bs_writer_overflow(const bs_writer *w);
+BS_API BS_MUST_USE size_t bs_writer_len(const bs_writer *w);
 
 /* ---------------------------------------------------------------------------
  * Symbol table
@@ -349,10 +375,11 @@ typedef struct bs_symbols {
 /* Resolve an index to its text. Returns 0 for an index this build cannot
  * name, which includes a reserved index a future specification may define --
  * guessing would make the token read differently here than elsewhere. */
-BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out);
+BS_API BS_MUST_USE int bs_symbol_get(const bs_symbols *s, uint64_t index,
+                                     bs_span *out);
 
 /* How many well-known symbols this build knows. */
-BS_API size_t bs_symbol_default_count(void);
+BS_API BS_MUST_USE size_t bs_symbol_default_count(void);
 
 /* ---------------------------------------------------------------------------
  * Datalog rendering
@@ -366,8 +393,8 @@ BS_API size_t bs_symbol_default_count(void);
  *
  * On any error the bytes already written to `w` are undefined: the caller
  * discards the whole rendering, never a prefix of it. */
-BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
-                               bs_span term);
+BS_API BS_MUST_USE bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
+                                           bs_span term);
 
 /* ===========================================================================
  * 30_impl_open.inc
@@ -377,9 +404,16 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
 
 /* The entire libc surface of this library. Invariant 5.
  *
- * memcpy/memcmp/memset only: no stdio, no locale-sensitive string handling,
- * no allocation, no floating point. This is what makes the header usable in
- * a kernel module, a WASM sandbox or a bare-metal firmware without a shim. */
+ * memcpy, memcmp and memset only: no stdio, no locale-sensitive string
+ * handling, no allocation, no floating point. This is what makes the header
+ * usable in a kernel module, a WASM sandbox or a bare-metal firmware without
+ * a shim.
+ *
+ * The str* family is absent by construction, not by discipline: string
+ * lengths come from sizeof at compile time, because a hand-written scan for
+ * the terminator is recognised by the optimiser and rewritten into a call to
+ * strlen. tools/check_invariants.py reads the undefined symbols off the
+ * compiled object, which is the only place that shows. */
 #include <string.h>
 
 /* ===========================================================================
@@ -394,8 +428,22 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
  * size derived from bytes we did not write ourselves.
  * ------------------------------------------------------------------------ */
 
-#if defined(__GNUC__) || defined(__clang__)
+/* Gated on the compilers that actually have these builtins rather than on
+ * __GNUC__ alone: clang reports __GNUC__ as 4 regardless of its own version,
+ * so a bare "__GNUC__ >= 5" would silently drop every clang build onto the
+ * portable path.
+ *
+ * __has_builtin would be the elegant test and is not used: not every
+ * preprocessor that reads this header can evaluate it -- cppcheck's cannot --
+ * and a version test is just as correct here. Clang has had both builtins
+ * since 3.4, GCC since 5.
+ *
+ * Defining BS_NO_OVERFLOW_BUILTINS selects the portable path. CI builds the
+ * whole test suite that way as well, so the fallback cannot rot unnoticed. */
+#ifndef BS_NO_OVERFLOW_BUILTINS
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
 #define BS_HAS_OVERFLOW_BUILTINS 1
+#endif
 #endif
 
 /* All three return 1 on success, 0 on overflow, and leave *out untouched on
@@ -457,7 +505,6 @@ BS_API const char *bs_strstatus(bs_status st) {
       "ok",
       "invalid argument",
       "arena exhausted",
-      "input truncated",
       "malformed input",
       "nesting too deep",
       "arithmetic overflow",
@@ -500,6 +547,21 @@ BS_API int bs_span_slice(bs_span s, size_t off, size_t len, bs_span *out) {
   if (!bs_size_add(off, len, &end) || end > s.n) {
     return 0;
   }
+  /* NULL + 0 is undefined in C99, however harmless it looks -- C23 defines
+   * it, this library targets C99 -- so an empty result never does the
+   * arithmetic at all. */
+  if (len == 0U) {
+    out->p = NULL;
+    out->n = 0U;
+    return 1;
+  }
+  /* Past here the slice is non-empty, so s.n is non-zero, so s.p is non-null
+   * by the invariant bs_span_make establishes. Restating it costs one compare
+   * and turns an invariant the static analyser cannot derive across a struct
+   * into one it can see. */
+  if (s.p == NULL) {
+    return 0;
+  }
   out->p = s.p + off;
   out->n = len;
   return 1;
@@ -530,7 +592,14 @@ BS_API size_t bs_cursor_left(const bs_cursor *c) {
   /* c->off is an invariant of the cursor, never assigned past c->s.n, so the
    * subtraction cannot wrap. The guard documents that and survives a future
    * edit that breaks the invariant. */
-  if (c == NULL || c->off > c->s.n) {
+  if (c == NULL) {
+    return 0U;
+  }
+  /* The cursor never advances past its span; every take_* checks first. The
+   * assert states that belief so the fuzzer can falsify it, while the guard
+   * below keeps a release build correct if it is ever wrong. */
+  BS_ASSERT(c->off <= c->s.n);
+  if (c->off > c->s.n) {
     return 0U;
   }
   return c->s.n - c->off;
@@ -558,6 +627,7 @@ BS_API int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out) {
     return 0;
   }
   c->off += n; /* bounded by the bs_cursor_left check above */
+  BS_ASSERT(c->off <= c->s.n);
   *out = sub;
   return 1;
 }
@@ -567,14 +637,46 @@ BS_API int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out) {
  * ------------------------------------------------------------------------ */
 
 BS_API bs_status bs_arena_init(bs_arena *a, void *buf, size_t cap) {
+  uint8_t *base = (uint8_t *)buf;
+
   if (a == NULL) {
     return BS_ERR_ARGUMENT;
   }
   if (buf == NULL && cap != 0U) {
     return BS_ERR_ARGUMENT;
   }
-  a->base = (uint8_t *)buf;
-  a->cap = (buf == NULL) ? 0U : cap;
+
+  /* bs_arena_alloc aligns the *offset*, so every pointer it returns inherits
+   * whatever misalignment the base has. A caller carving an arena out of a
+   * larger buffer -- bs_arena_init(&a, scratch + used, n) -- would otherwise
+   * get struct pointers that are undefined to dereference under C99 and a
+   * bus fault on ARMv7-M, SPARC or RISC-V without misaligned access.
+   *
+   * The leading pad is absorbed here rather than rejected: refusing the
+   * buffer would push this arithmetic onto every caller, which is exactly
+   * where it gets forgotten. */
+#ifdef UINTPTR_MAX
+  if (base != NULL) {
+    size_t misalign =
+        (size_t)((uintptr_t)base & (uintptr_t)(BS_ALIGN_MAX - 1U));
+    size_t pad = (misalign == 0U) ? 0U : (size_t)(BS_ALIGN_MAX - misalign);
+    if (pad >= cap) {
+      /* Nothing usable survives the padding. An arena that fails every
+       * allocation is the honest outcome, not a short one. */
+      base = NULL;
+      cap = 0U;
+    } else {
+      base += pad;
+      cap -= pad;
+    }
+  }
+#else
+  /* No uintptr_t: the alignment of the base cannot be inspected portably, so
+   * the caller must supply a suitably aligned buffer. Documented in the API. */
+#endif
+
+  a->base = base;
+  a->cap = (base == NULL) ? 0U : cap;
   a->off = 0U;
   a->peak = 0U;
   a->failed = 0;
@@ -609,6 +711,8 @@ BS_API void *bs_arena_alloc(bs_arena *a, size_t size, size_t align) {
     return NULL;
   }
 
+  BS_ASSERT(start <= end);
+  BS_ASSERT(end <= a->cap);
   a->off = end;
   if (end > a->peak) {
     a->peak = end;
@@ -858,6 +962,7 @@ static int bs_pb_next(bs_cursor *c, bs_pb_field *f) {
  * compressed SEC1 point whose leading byte must be 0x02 or 0x03. */
 #define BS_ED25519_PUBKEY_LEN 32U
 #define BS_ED25519_SIG_LEN 64U
+#define BS_ED25519_SECRET_LEN 32U
 #define BS_SECP256R1_PUBKEY_LEN 33U
 
 static bs_status bs_pb_pubkey(bs_span in, bs_public_key *out) {
@@ -935,7 +1040,10 @@ static bs_status bs_pb_external_sig(bs_span in, bs_signed_block *out) {
   return BS_OK;
 }
 
-static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
+/* `is_authority` gates the rules that apply only to block 0. The decoder
+ * cannot infer it: a SignedBlock looks identical wherever it sits. */
+static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out,
+                                    int is_authority) {
   bs_cursor c = bs_cursor_make(in);
   bs_pb_field f;
   int have_block = 0;
@@ -982,6 +1090,16 @@ static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
       if (f.wire != BS_PB_BYTES) {
         return BS_ERR_MALFORMED;
       }
+      /* SPECIFICATIONS.md: "The authority block can't carry an external
+       * signature. This is necessary to make sure an external signature
+       * can't be used for any other token." The verifying procedure is
+       * scoped "from 1 to n" to match. Rejected here rather than left to the
+       * verifier, because the authority's own signature payload has no slot
+       * for an external signature -- so an injected one is not covered by
+       * the root key and would survive chain verification untouched. */
+      if (is_authority) {
+        return BS_ERR_MALFORMED;
+      }
       st = bs_pb_external_sig(f.bytes, out);
       if (st != BS_OK) {
         return st;
@@ -1001,19 +1119,29 @@ static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
   if (!have_block || !have_next || !have_sig) {
     return BS_ERR_MALFORMED;
   }
-  /* A signature is verified with the *previous* block's key, whose algorithm
-   * this function cannot see. That does not matter while Ed25519 is the only
-   * algorithm this build accepts -- every other one has already been refused
-   * by bs_pb_pubkey -- so every signature must be 64 bytes.
+  /* A block's signature is made with the *previous* block's key, and the
+   * authority's with the root key -- neither of which this function can see.
+   * So this is not a check of the declared algorithm: it is an Ed25519-only
+   * heuristic that happens to be exact while Ed25519 is the only algorithm
+   * this build accepts, since bs_pb_pubkey has already refused every other
+   * one. It also silently constrains the root key to Ed25519, which the
+   * container genuinely cannot observe.
    *
-   * When secp256r1 lands in 1.1 this check moves to the verifier, which knows
-   * the signing key. Until then, catching a truncated signature here is what
-   * stops a malformed token from reaching the crypto at all. */
+   * When secp256r1 lands in 1.1 this must move to the verifier, which knows
+   * the signing key. Until then it is what stops a truncated signature from
+   * reaching the crypto at all. */
   if (out->signature.n != BS_ED25519_SIG_LEN) {
     return BS_ERR_MALFORMED;
   }
-  if (out->has_external && out->external_signature.n != BS_ED25519_SIG_LEN) {
-    return BS_ERR_MALFORMED;
+  if (out->has_external) {
+    if (out->external_signature.n != BS_ED25519_SIG_LEN) {
+      return BS_ERR_MALFORMED;
+    }
+    /* SPECIFICATIONS.md: "Signature version 1 *must* be used for third-party
+     * blocks." Version 0 has no external-signature payload defined at all. */
+    if (out->version != 1U) {
+      return BS_ERR_MALFORMED;
+    }
   }
   return BS_OK;
 }
@@ -1021,7 +1149,8 @@ static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
 static bs_status bs_pb_proof(bs_span in, bs_token *out) {
   bs_cursor c = bs_cursor_make(in);
   bs_pb_field f;
-  int seen = 0;
+  int have_secret = 0;
+  int have_final = 0;
 
   while (!bs_cursor_done(&c)) {
     if (!bs_pb_next(&c, &f)) {
@@ -1030,19 +1159,34 @@ static bs_status bs_pb_proof(bs_span in, bs_token *out) {
     if (f.wire != BS_PB_BYTES) {
       continue;
     }
+    /* Repeating the *same* branch is ordinary protobuf: canonical decoders
+     * take the last occurrence, and rejecting it would make this stricter
+     * than every writer. Repeating the *other* branch is the dangerous case,
+     * and that is what the check below catches. */
     if (f.number == BS_F_PROOF_NEXT_SECRET) {
       out->sealed = 0;
       out->proof = f.bytes;
-      seen++;
+      have_secret = 1;
     } else if (f.number == BS_F_PROOF_FINAL_SIGNATURE) {
       out->sealed = 1;
       out->proof = f.bytes;
-      seen++;
+      have_final = 1;
     }
   }
-  /* The schema makes these a oneof: exactly one, never both, never neither.
-   * A token carrying both would let a verifier pick the branch it prefers. */
-  if (seen != 1) {
+
+  /* The schema makes these a oneof: exactly one branch, never both, never
+   * neither. A token carrying both would let a verifier pick the reading it
+   * prefers -- an unsealed token and a sealed one at the same time. */
+  if (have_secret == have_final) {
+    return BS_ERR_MALFORMED;
+  }
+
+  /* Every other key and signature in the container has its width checked; the
+   * proof was the exception. An Ed25519 secret scalar is 32 bytes and a
+   * signature is 64. Like the block signatures above, this is exact only
+   * while Ed25519 is the sole accepted algorithm. */
+  if (out->proof.n !=
+      (out->sealed ? BS_ED25519_SIG_LEN : BS_ED25519_SECRET_LEN)) {
     return BS_ERR_MALFORMED;
   }
   return BS_OK;
@@ -1052,6 +1196,7 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
   bs_cursor c;
   bs_pb_field f;
   size_t appended = 0;
+  size_t total;
   size_t index;
   bs_span authority = bs_span_make(NULL, 0);
   bs_span proof = bs_span_make(NULL, 0);
@@ -1098,7 +1243,9 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       if (f.wire != BS_PB_BYTES) {
         return BS_ERR_MALFORMED;
       }
-      appended++;
+      if (!bs_size_add(appended, 1U, &appended)) {
+        return BS_ERR_OVERFLOW;
+      }
       break;
     case BS_F_BISCUIT_PROOF:
       if (f.wire != BS_PB_BYTES) {
@@ -1117,11 +1264,14 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
   }
   /* Every block costs a signature verification, so the ceiling is a denial-of
    * -service bound as much as a memory one. */
-  if (appended + 1U > (size_t)BS_MAX_BLOCKS) {
+  if (!bs_size_add(appended, 1U, &total)) {
+    return BS_ERR_OVERFLOW;
+  }
+  if (total > (size_t)BS_MAX_BLOCKS) {
     return BS_ERR_LIMIT;
   }
 
-  tok.block_count = appended + 1U;
+  tok.block_count = total;
   tok.blocks = (bs_signed_block *)bs_arena_array(
       a, tok.block_count, sizeof(bs_signed_block), BS_ALIGN_MAX);
   if (tok.blocks == NULL) {
@@ -1132,7 +1282,7 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
    * the signature chain is verified block by block from the authority
    * outwards, and a reordered token must not verify. */
   {
-    bs_status st = bs_pb_signed_block(authority, &tok.blocks[0]);
+    bs_status st = bs_pb_signed_block(authority, &tok.blocks[0], 1);
     if (st != BS_OK) {
       return st;
     }
@@ -1149,7 +1299,8 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       if (index >= tok.block_count) {
         return BS_ERR_MALFORMED;
       }
-      st = bs_pb_signed_block(f.bytes, &tok.blocks[index]);
+      BS_ASSERT(index < tok.block_count);
+      st = bs_pb_signed_block(f.bytes, &tok.blocks[index], 0);
       if (st != BS_OK) {
         return st;
       }
@@ -1237,18 +1388,15 @@ static void bs_put_byte(bs_writer *w, uint8_t b) {
   bs_put_span(w, bs_span_make(&b, 1U));
 }
 
-/* Literal text. The length is computed here rather than taken from the caller
- * so a mismatched sizeof can never walk off the end of a string constant. */
-static void bs_put_cstr(bs_writer *w, const char *s) {
-  size_t n = 0;
-  if (s == NULL) {
-    return;
-  }
-  while (s[n] != '\0') {
-    n++;
-  }
-  bs_put_span(w, bs_span_make(s, n));
-}
+/* Literal text, with its length taken at compile time.
+ *
+ * A scan for the terminator would be the obvious implementation and is the
+ * wrong one: clang recognises that loop and rewrites it into a call to
+ * strlen, which puts a str* function into the shipped object and breaks
+ * invariant 5. tools/check_invariants.py caught exactly that. sizeof cannot
+ * be rewritten into anything. */
+#define BS_PUT_LIT(w, lit)                                                     \
+  bs_put_span((w), bs_span_make((lit), sizeof(lit) - 1U))
 
 /* Signed decimal, INT64_MIN included.
  *
@@ -1315,19 +1463,19 @@ static void bs_put_string(bs_writer *w, bs_span s) {
     uint8_t c = s.p[i];
     switch (c) {
     case (uint8_t)'"':
-      bs_put_cstr(w, "\\\"");
+      BS_PUT_LIT(w, "\\\"");
       break;
     case (uint8_t)'\\':
-      bs_put_cstr(w, "\\\\");
+      BS_PUT_LIT(w, "\\\\");
       break;
     case (uint8_t)'\n':
-      bs_put_cstr(w, "\\n");
+      BS_PUT_LIT(w, "\\n");
       break;
     case (uint8_t)'\t':
-      bs_put_cstr(w, "\\t");
+      BS_PUT_LIT(w, "\\t");
       break;
     case (uint8_t)'\r':
-      bs_put_cstr(w, "\\r");
+      BS_PUT_LIT(w, "\\r");
       break;
     default:
       bs_put_byte(w, c);
@@ -1407,24 +1555,30 @@ static void bs_put_date(bs_writer *w, uint64_t seconds) {
  * inside tokens that already exist. */
 #define BS_SYMBOL_OFFSET 1024U
 
-static const char *const BS_DEFAULT_SYMBOLS[] = {
-    "read",    "write",     "resource", "operation", "right",   "time",
-    "role",    "owner",     "tenant",   "namespace", "user",    "team",
-    "service", "admin",     "email",    "group",     "member",  "ip_address",
-    "client",  "client_ip", "domain",   "path",      "version", "cluster",
-    "node",    "hostname",  "nonce",    "query",
+/* Text and length together: a length taken by scanning for the terminator
+ * compiles down to a call to strlen, which invariant 5 forbids. */
+typedef struct bs_static_symbol {
+  const char *text;
+  size_t len;
+} bs_static_symbol;
+
+#define BS_SYM(s) {s, sizeof(s) - 1U}
+
+static const bs_static_symbol BS_DEFAULT_SYMBOLS[] = {
+    BS_SYM("read"),      BS_SYM("write"),     BS_SYM("resource"),
+    BS_SYM("operation"), BS_SYM("right"),     BS_SYM("time"),
+    BS_SYM("role"),      BS_SYM("owner"),     BS_SYM("tenant"),
+    BS_SYM("namespace"), BS_SYM("user"),      BS_SYM("team"),
+    BS_SYM("service"),   BS_SYM("admin"),     BS_SYM("email"),
+    BS_SYM("group"),     BS_SYM("member"),    BS_SYM("ip_address"),
+    BS_SYM("client"),    BS_SYM("client_ip"), BS_SYM("domain"),
+    BS_SYM("path"),      BS_SYM("version"),   BS_SYM("cluster"),
+    BS_SYM("node"),      BS_SYM("hostname"),  BS_SYM("nonce"),
+    BS_SYM("query"),
 };
 
 #define BS_DEFAULT_SYMBOL_COUNT                                                \
   (sizeof BS_DEFAULT_SYMBOLS / sizeof BS_DEFAULT_SYMBOLS[0])
-
-static size_t bs_cstr_len(const char *s) {
-  size_t n = 0;
-  while (s[n] != '\0') {
-    n++;
-  }
-  return n;
-}
 
 BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out) {
   if (out == NULL) {
@@ -1432,7 +1586,7 @@ BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out) {
   }
 
   if (index < BS_SYMBOL_OFFSET) {
-    const char *text;
+    const bs_static_symbol *entry;
     if (index >= (uint64_t)BS_DEFAULT_SYMBOL_COUNT) {
       /* An index inside the reserved range but past the list this build
        * knows. A future specification may define it; this one cannot print
@@ -1440,8 +1594,8 @@ BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out) {
        * than everywhere else. */
       return 0;
     }
-    text = BS_DEFAULT_SYMBOLS[(size_t)index];
-    *out = bs_span_make(text, bs_cstr_len(text));
+    entry = &BS_DEFAULT_SYMBOLS[(size_t)index];
+    *out = bs_span_make(entry->text, entry->len);
     return 1;
   }
 
@@ -1580,7 +1734,7 @@ static int bs_term_step(bs_writer *w, const bs_symbols *sym, bs_span term,
       if (f.wire != BS_PB_BYTES || found++) {
         return 0;
       }
-      bs_put_cstr(w, "hex:");
+      BS_PUT_LIT(w, "hex:");
       bs_put_hex(w, f.bytes);
       result = 1;
       break;
@@ -1593,14 +1747,18 @@ static int bs_term_step(bs_writer *w, const bs_symbols *sym, bs_span term,
       if (f.varint > 1U) {
         return 0;
       }
-      bs_put_cstr(w, (f.varint != 0U) ? "true" : "false");
+      if (f.varint != 0U) {
+        BS_PUT_LIT(w, "true");
+      } else {
+        BS_PUT_LIT(w, "false");
+      }
       result = 1;
       break;
     case BS_F_TERM_NULL:
       if (f.wire != BS_PB_BYTES || found++) {
         return 0;
       }
-      bs_put_cstr(w, "null");
+      BS_PUT_LIT(w, "null");
       result = 1;
       break;
     case BS_F_TERM_SET:
@@ -1726,7 +1884,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
     }
 
     if (f->emitted++ > 0) {
-      bs_put_cstr(w, ", ");
+      BS_PUT_LIT(w, ", ");
     }
 
     value = item.bytes;
@@ -1738,7 +1896,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
       if (!bs_mapkey_print(w, sym, key)) {
         return BS_ERR_MALFORMED;
       }
-      bs_put_cstr(w, ": ");
+      BS_PUT_LIT(w, ": ");
     }
 
     step = bs_term_step(w, sym, value, &kind, &inner);
@@ -1751,6 +1909,7 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
          * stack -- which is the whole point of not recursing. */
         return BS_ERR_DEPTH;
       }
+      BS_ASSERT(depth < (size_t)BS_MAX_DEPTH);
       bs_put_open(w, kind);
       stack[depth].c = bs_cursor_make(inner);
       stack[depth].kind = kind;

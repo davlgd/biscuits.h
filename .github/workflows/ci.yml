@@ -71,6 +71,18 @@ jobs:
           submodules: recursive
       - run: make msan
 
+  # The design invariants, checked on the compiled artifact. This is what makes
+  # the table in README.md a claim rather than an aspiration.
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: make invariants
+        env:
+          CLANG: clang
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -84,6 +96,7 @@ jobs:
       - run: make format-check
       - run: make tidy
       - run: make cppcheck
+      - run: make check-metrics
 
   static-analysis:
     runs-on: ubuntu-latest

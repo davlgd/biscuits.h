@@ -224,6 +224,42 @@ static void put_proof(buf *w, uint32_t which) {
   put_bytes(w, BS_F_BISCUIT_PROOF, inner.b, inner.n);
 }
 
+/* An ExternalSignature submessage: a 64-byte signature plus a public key. */
+static void put_external_sig(buf *w, uint64_t key_alg, size_t key_len) {
+  buf inner;
+  size_t i;
+  inner.n = 0;
+  put_tag(&inner, BS_F_EXTSIG_SIGNATURE, BS_PB_BYTES);
+  put_varint(&inner, 64U);
+  for (i = 0; i < 64U; i++) {
+    put(&inner, (uint8_t)(0x80U + (i & 0x0FU)));
+  }
+  put_pubkey_prefixed(&inner, BS_F_EXTSIG_PUBLIC_KEY, key_alg, key_len,
+                      (key_alg == 1U) ? 0x02U : 0x40U);
+  put_bytes(w, BS_F_SIGNED_EXTERNAL_SIG, inner.b, inner.n);
+}
+
+/* A SignedBlock carrying an external signature, with a chosen payload
+ * version. Built field by field because the shape is the point of the test. */
+static void put_third_party_block(buf *w, uint32_t field, uint64_t version) {
+  buf inner;
+  size_t i;
+  inner.n = 0;
+  put_bytes(&inner, BS_F_SIGNED_BLOCK, NULL, 0U);
+  put_pubkey_prefixed(&inner, BS_F_SIGNED_NEXT_KEY, 0U, 32U, 0x40U);
+  put_tag(&inner, BS_F_SIGNED_SIGNATURE, BS_PB_BYTES);
+  put_varint(&inner, 64U);
+  for (i = 0; i < 64U; i++) {
+    put(&inner, (uint8_t)i);
+  }
+  put_external_sig(&inner, 0U, 32U);
+  if (version != 0U) {
+    put_tag(&inner, BS_F_SIGNED_VERSION, BS_PB_VARINT);
+    put_varint(&inner, version);
+  }
+  put_bytes(w, field, inner.b, inner.n);
+}
+
 static bs_status parse(const buf *w) {
   static uint8_t scratch[16384];
   bs_arena a;
@@ -333,6 +369,95 @@ static void test_token_rejects_unknown_algorithms(void) {
   CHECK(parse(&w) == BS_ERR_MALFORMED);
 }
 
+static void test_authority_cannot_carry_an_external_signature(void) {
+  buf w;
+
+  /* The specification is unconditional: "The authority block can't carry an
+   * external signature. This is necessary to make sure an external signature
+   * can't be used for any other token." The authority's own signature payload
+   * has no slot for one either, so an injected external signature would not
+   * be covered by the root key and would survive chain verification. */
+  w.n = 0;
+  put_third_party_block(&w, BS_F_BISCUIT_AUTHORITY, 1U);
+  put_proof(&w, BS_F_PROOF_NEXT_SECRET);
+  CHECK(parse(&w) == BS_ERR_MALFORMED);
+
+  /* The same block appended rather than first is perfectly legal. */
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  put_third_party_block(&w, BS_F_BISCUIT_BLOCKS, 1U);
+  put_proof(&w, BS_F_PROOF_NEXT_SECRET);
+  CHECK(parse(&w) == BS_OK);
+}
+
+static void test_third_party_blocks_require_payload_version_one(void) {
+  buf w;
+
+  /* "Signature version 1 *must* be used for third-party blocks." Version 0
+   * defines no external-signature payload at all, so a block claiming one is
+   * asking to be verified against a format that does not exist. */
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  put_third_party_block(&w, BS_F_BISCUIT_BLOCKS, 0U); /* version absent */
+  put_proof(&w, BS_F_PROOF_NEXT_SECRET);
+  CHECK(parse(&w) == BS_ERR_MALFORMED);
+
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  put_third_party_block(&w, BS_F_BISCUIT_BLOCKS, 2U);
+  put_proof(&w, BS_F_PROOF_NEXT_SECRET);
+  CHECK(parse(&w) == BS_ERR_MALFORMED);
+}
+
+static void test_proof_width_is_checked(void) {
+  buf w;
+  buf inner;
+  static const uint8_t blob[64] = {0};
+
+  /* Every other key and signature in the container has its width checked; the
+   * proof used to be the exception. */
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  inner.n = 0;
+  put_bytes(&inner, BS_F_PROOF_NEXT_SECRET, blob, 31U);
+  put_bytes(&w, BS_F_BISCUIT_PROOF, inner.b, inner.n);
+  CHECK(parse(&w) == BS_ERR_MALFORMED);
+
+  /* A sealed token proves with a 64-byte signature, not a 32-byte secret. */
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  inner.n = 0;
+  put_bytes(&inner, BS_F_PROOF_FINAL_SIGNATURE, blob, 32U);
+  put_bytes(&w, BS_F_BISCUIT_PROOF, inner.b, inner.n);
+  CHECK(parse(&w) == BS_ERR_MALFORMED);
+
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  inner.n = 0;
+  put_bytes(&inner, BS_F_PROOF_FINAL_SIGNATURE, blob, 64U);
+  put_bytes(&w, BS_F_BISCUIT_PROOF, inner.b, inner.n);
+  CHECK(parse(&w) == BS_OK);
+}
+
+static void test_proof_repeated_same_branch_is_accepted(void) {
+  buf w;
+  buf inner;
+  static const uint8_t a[32] = {1};
+  static const uint8_t b[32] = {2};
+
+  /* Repeating the same branch is ordinary protobuf: canonical decoders take
+   * the last occurrence. Rejecting it would make this decoder stricter than
+   * every writer, for no security gain -- the dangerous case is the other
+   * branch, which is still refused. */
+  w.n = 0;
+  put_signed_block(&w, BS_F_BISCUIT_AUTHORITY, 64U, 0U, 32U);
+  inner.n = 0;
+  put_bytes(&inner, BS_F_PROOF_NEXT_SECRET, a, sizeof a);
+  put_bytes(&inner, BS_F_PROOF_NEXT_SECRET, b, sizeof b);
+  put_bytes(&w, BS_F_BISCUIT_PROOF, inner.b, inner.n);
+  CHECK(parse(&w) == BS_OK);
+}
+
 static void test_token_block_ceiling(void) {
   buf w;
   int i;
@@ -425,6 +550,10 @@ int main(void) {
   test_token_proof_is_exclusive();
   test_token_validates_key_and_signature_sizes();
   test_token_rejects_unknown_algorithms();
+  test_authority_cannot_carry_an_external_signature();
+  test_third_party_blocks_require_payload_version_one();
+  test_proof_width_is_checked();
+  test_proof_repeated_same_branch_is_accepted();
   test_token_block_ceiling();
   test_token_ignores_unknown_fields();
   test_token_arena_exhaustion_is_reported();

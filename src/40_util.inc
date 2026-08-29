@@ -6,8 +6,22 @@
  * size derived from bytes we did not write ourselves.
  * ------------------------------------------------------------------------ */
 
-#if defined(__GNUC__) || defined(__clang__)
+/* Gated on the compilers that actually have these builtins rather than on
+ * __GNUC__ alone: clang reports __GNUC__ as 4 regardless of its own version,
+ * so a bare "__GNUC__ >= 5" would silently drop every clang build onto the
+ * portable path.
+ *
+ * __has_builtin would be the elegant test and is not used: not every
+ * preprocessor that reads this header can evaluate it -- cppcheck's cannot --
+ * and a version test is just as correct here. Clang has had both builtins
+ * since 3.4, GCC since 5.
+ *
+ * Defining BS_NO_OVERFLOW_BUILTINS selects the portable path. CI builds the
+ * whole test suite that way as well, so the fallback cannot rot unnoticed. */
+#ifndef BS_NO_OVERFLOW_BUILTINS
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 5)
 #define BS_HAS_OVERFLOW_BUILTINS 1
+#endif
 #endif
 
 /* All three return 1 on success, 0 on overflow, and leave *out untouched on
@@ -69,7 +83,6 @@ BS_API const char *bs_strstatus(bs_status st) {
       "ok",
       "invalid argument",
       "arena exhausted",
-      "input truncated",
       "malformed input",
       "nesting too deep",
       "arithmetic overflow",
@@ -112,6 +125,21 @@ BS_API int bs_span_slice(bs_span s, size_t off, size_t len, bs_span *out) {
   if (!bs_size_add(off, len, &end) || end > s.n) {
     return 0;
   }
+  /* NULL + 0 is undefined in C99, however harmless it looks -- C23 defines
+   * it, this library targets C99 -- so an empty result never does the
+   * arithmetic at all. */
+  if (len == 0U) {
+    out->p = NULL;
+    out->n = 0U;
+    return 1;
+  }
+  /* Past here the slice is non-empty, so s.n is non-zero, so s.p is non-null
+   * by the invariant bs_span_make establishes. Restating it costs one compare
+   * and turns an invariant the static analyser cannot derive across a struct
+   * into one it can see. */
+  if (s.p == NULL) {
+    return 0;
+  }
   out->p = s.p + off;
   out->n = len;
   return 1;
@@ -142,7 +170,14 @@ BS_API size_t bs_cursor_left(const bs_cursor *c) {
   /* c->off is an invariant of the cursor, never assigned past c->s.n, so the
    * subtraction cannot wrap. The guard documents that and survives a future
    * edit that breaks the invariant. */
-  if (c == NULL || c->off > c->s.n) {
+  if (c == NULL) {
+    return 0U;
+  }
+  /* The cursor never advances past its span; every take_* checks first. The
+   * assert states that belief so the fuzzer can falsify it, while the guard
+   * below keeps a release build correct if it is ever wrong. */
+  BS_ASSERT(c->off <= c->s.n);
+  if (c->off > c->s.n) {
     return 0U;
   }
   return c->s.n - c->off;
@@ -170,6 +205,7 @@ BS_API int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out) {
     return 0;
   }
   c->off += n; /* bounded by the bs_cursor_left check above */
+  BS_ASSERT(c->off <= c->s.n);
   *out = sub;
   return 1;
 }
@@ -179,14 +215,46 @@ BS_API int bs_take_bytes(bs_cursor *c, size_t n, bs_span *out) {
  * ------------------------------------------------------------------------ */
 
 BS_API bs_status bs_arena_init(bs_arena *a, void *buf, size_t cap) {
+  uint8_t *base = (uint8_t *)buf;
+
   if (a == NULL) {
     return BS_ERR_ARGUMENT;
   }
   if (buf == NULL && cap != 0U) {
     return BS_ERR_ARGUMENT;
   }
-  a->base = (uint8_t *)buf;
-  a->cap = (buf == NULL) ? 0U : cap;
+
+  /* bs_arena_alloc aligns the *offset*, so every pointer it returns inherits
+   * whatever misalignment the base has. A caller carving an arena out of a
+   * larger buffer -- bs_arena_init(&a, scratch + used, n) -- would otherwise
+   * get struct pointers that are undefined to dereference under C99 and a
+   * bus fault on ARMv7-M, SPARC or RISC-V without misaligned access.
+   *
+   * The leading pad is absorbed here rather than rejected: refusing the
+   * buffer would push this arithmetic onto every caller, which is exactly
+   * where it gets forgotten. */
+#ifdef UINTPTR_MAX
+  if (base != NULL) {
+    size_t misalign =
+        (size_t)((uintptr_t)base & (uintptr_t)(BS_ALIGN_MAX - 1U));
+    size_t pad = (misalign == 0U) ? 0U : (size_t)(BS_ALIGN_MAX - misalign);
+    if (pad >= cap) {
+      /* Nothing usable survives the padding. An arena that fails every
+       * allocation is the honest outcome, not a short one. */
+      base = NULL;
+      cap = 0U;
+    } else {
+      base += pad;
+      cap -= pad;
+    }
+  }
+#else
+  /* No uintptr_t: the alignment of the base cannot be inspected portably, so
+   * the caller must supply a suitably aligned buffer. Documented in the API. */
+#endif
+
+  a->base = base;
+  a->cap = (base == NULL) ? 0U : cap;
   a->off = 0U;
   a->peak = 0U;
   a->failed = 0;
@@ -221,6 +289,8 @@ BS_API void *bs_arena_alloc(bs_arena *a, size_t size, size_t align) {
     return NULL;
   }
 
+  BS_ASSERT(start <= end);
+  BS_ASSERT(end <= a->cap);
   a->off = end;
   if (end > a->peak) {
     a->peak = end;

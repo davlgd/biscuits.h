@@ -38,6 +38,7 @@
  * compressed SEC1 point whose leading byte must be 0x02 or 0x03. */
 #define BS_ED25519_PUBKEY_LEN 32U
 #define BS_ED25519_SIG_LEN 64U
+#define BS_ED25519_SECRET_LEN 32U
 #define BS_SECP256R1_PUBKEY_LEN 33U
 
 static bs_status bs_pb_pubkey(bs_span in, bs_public_key *out) {
@@ -115,7 +116,10 @@ static bs_status bs_pb_external_sig(bs_span in, bs_signed_block *out) {
   return BS_OK;
 }
 
-static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
+/* `is_authority` gates the rules that apply only to block 0. The decoder
+ * cannot infer it: a SignedBlock looks identical wherever it sits. */
+static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out,
+                                    int is_authority) {
   bs_cursor c = bs_cursor_make(in);
   bs_pb_field f;
   int have_block = 0;
@@ -162,6 +166,16 @@ static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
       if (f.wire != BS_PB_BYTES) {
         return BS_ERR_MALFORMED;
       }
+      /* SPECIFICATIONS.md: "The authority block can't carry an external
+       * signature. This is necessary to make sure an external signature
+       * can't be used for any other token." The verifying procedure is
+       * scoped "from 1 to n" to match. Rejected here rather than left to the
+       * verifier, because the authority's own signature payload has no slot
+       * for an external signature -- so an injected one is not covered by
+       * the root key and would survive chain verification untouched. */
+      if (is_authority) {
+        return BS_ERR_MALFORMED;
+      }
       st = bs_pb_external_sig(f.bytes, out);
       if (st != BS_OK) {
         return st;
@@ -181,19 +195,29 @@ static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
   if (!have_block || !have_next || !have_sig) {
     return BS_ERR_MALFORMED;
   }
-  /* A signature is verified with the *previous* block's key, whose algorithm
-   * this function cannot see. That does not matter while Ed25519 is the only
-   * algorithm this build accepts -- every other one has already been refused
-   * by bs_pb_pubkey -- so every signature must be 64 bytes.
+  /* A block's signature is made with the *previous* block's key, and the
+   * authority's with the root key -- neither of which this function can see.
+   * So this is not a check of the declared algorithm: it is an Ed25519-only
+   * heuristic that happens to be exact while Ed25519 is the only algorithm
+   * this build accepts, since bs_pb_pubkey has already refused every other
+   * one. It also silently constrains the root key to Ed25519, which the
+   * container genuinely cannot observe.
    *
-   * When secp256r1 lands in 1.1 this check moves to the verifier, which knows
-   * the signing key. Until then, catching a truncated signature here is what
-   * stops a malformed token from reaching the crypto at all. */
+   * When secp256r1 lands in 1.1 this must move to the verifier, which knows
+   * the signing key. Until then it is what stops a truncated signature from
+   * reaching the crypto at all. */
   if (out->signature.n != BS_ED25519_SIG_LEN) {
     return BS_ERR_MALFORMED;
   }
-  if (out->has_external && out->external_signature.n != BS_ED25519_SIG_LEN) {
-    return BS_ERR_MALFORMED;
+  if (out->has_external) {
+    if (out->external_signature.n != BS_ED25519_SIG_LEN) {
+      return BS_ERR_MALFORMED;
+    }
+    /* SPECIFICATIONS.md: "Signature version 1 *must* be used for third-party
+     * blocks." Version 0 has no external-signature payload defined at all. */
+    if (out->version != 1U) {
+      return BS_ERR_MALFORMED;
+    }
   }
   return BS_OK;
 }
@@ -201,7 +225,8 @@ static bs_status bs_pb_signed_block(bs_span in, bs_signed_block *out) {
 static bs_status bs_pb_proof(bs_span in, bs_token *out) {
   bs_cursor c = bs_cursor_make(in);
   bs_pb_field f;
-  int seen = 0;
+  int have_secret = 0;
+  int have_final = 0;
 
   while (!bs_cursor_done(&c)) {
     if (!bs_pb_next(&c, &f)) {
@@ -210,19 +235,34 @@ static bs_status bs_pb_proof(bs_span in, bs_token *out) {
     if (f.wire != BS_PB_BYTES) {
       continue;
     }
+    /* Repeating the *same* branch is ordinary protobuf: canonical decoders
+     * take the last occurrence, and rejecting it would make this stricter
+     * than every writer. Repeating the *other* branch is the dangerous case,
+     * and that is what the check below catches. */
     if (f.number == BS_F_PROOF_NEXT_SECRET) {
       out->sealed = 0;
       out->proof = f.bytes;
-      seen++;
+      have_secret = 1;
     } else if (f.number == BS_F_PROOF_FINAL_SIGNATURE) {
       out->sealed = 1;
       out->proof = f.bytes;
-      seen++;
+      have_final = 1;
     }
   }
-  /* The schema makes these a oneof: exactly one, never both, never neither.
-   * A token carrying both would let a verifier pick the branch it prefers. */
-  if (seen != 1) {
+
+  /* The schema makes these a oneof: exactly one branch, never both, never
+   * neither. A token carrying both would let a verifier pick the reading it
+   * prefers -- an unsealed token and a sealed one at the same time. */
+  if (have_secret == have_final) {
+    return BS_ERR_MALFORMED;
+  }
+
+  /* Every other key and signature in the container has its width checked; the
+   * proof was the exception. An Ed25519 secret scalar is 32 bytes and a
+   * signature is 64. Like the block signatures above, this is exact only
+   * while Ed25519 is the sole accepted algorithm. */
+  if (out->proof.n !=
+      (out->sealed ? BS_ED25519_SIG_LEN : BS_ED25519_SECRET_LEN)) {
     return BS_ERR_MALFORMED;
   }
   return BS_OK;
@@ -232,6 +272,7 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
   bs_cursor c;
   bs_pb_field f;
   size_t appended = 0;
+  size_t total;
   size_t index;
   bs_span authority = bs_span_make(NULL, 0);
   bs_span proof = bs_span_make(NULL, 0);
@@ -278,7 +319,9 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       if (f.wire != BS_PB_BYTES) {
         return BS_ERR_MALFORMED;
       }
-      appended++;
+      if (!bs_size_add(appended, 1U, &appended)) {
+        return BS_ERR_OVERFLOW;
+      }
       break;
     case BS_F_BISCUIT_PROOF:
       if (f.wire != BS_PB_BYTES) {
@@ -297,11 +340,14 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
   }
   /* Every block costs a signature verification, so the ceiling is a denial-of
    * -service bound as much as a memory one. */
-  if (appended + 1U > (size_t)BS_MAX_BLOCKS) {
+  if (!bs_size_add(appended, 1U, &total)) {
+    return BS_ERR_OVERFLOW;
+  }
+  if (total > (size_t)BS_MAX_BLOCKS) {
     return BS_ERR_LIMIT;
   }
 
-  tok.block_count = appended + 1U;
+  tok.block_count = total;
   tok.blocks = (bs_signed_block *)bs_arena_array(
       a, tok.block_count, sizeof(bs_signed_block), BS_ALIGN_MAX);
   if (tok.blocks == NULL) {
@@ -312,7 +358,7 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
    * the signature chain is verified block by block from the authority
    * outwards, and a reordered token must not verify. */
   {
-    bs_status st = bs_pb_signed_block(authority, &tok.blocks[0]);
+    bs_status st = bs_pb_signed_block(authority, &tok.blocks[0], 1);
     if (st != BS_OK) {
       return st;
     }
@@ -329,7 +375,8 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out) {
       if (index >= tok.block_count) {
         return BS_ERR_MALFORMED;
       }
-      st = bs_pb_signed_block(f.bytes, &tok.blocks[index]);
+      BS_ASSERT(index < tok.block_count);
+      st = bs_pb_signed_block(f.bytes, &tok.blocks[index], 0);
       if (st != BS_OK) {
         return st;
       }
