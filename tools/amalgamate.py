@@ -47,6 +47,7 @@ PARTS = [
     "130_engine.inc",
     "135_lex.inc",
     "140_parse.inc",
+    "145_authorize.inc",
     "99_epilogue.inc",
 ]
 

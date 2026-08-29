@@ -915,6 +915,12 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
     if (st != BS_OK) {
       return st;
     }
+    /* Invalid on sight, not on use: a rule whose head names a variable its
+     * body never binds is rejected here rather than when it first fires. */
+    st = bs_rule_bound(w, &w->rules[w->rule_count]);
+    if (st != BS_OK) {
+      return st;
+    }
     w->rule_count++;
   }
 
@@ -988,6 +994,10 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
     w->checks[w->check_count].query_count = (uint32_t)queries;
     w->checks[w->check_count].kind = (uint8_t)kind;
     w->checks[w->check_count].block = (uint32_t)block_index;
+    /* Its own encoding, so a failure can be reported through the same
+     * printer the `blocks` tier already holds to the reference's output. */
+    w->checks[w->check_count].src = f.bytes;
+    w->checks[w->check_count].from_text = 0;
     w->check_count++;
   }
   return BS_OK;

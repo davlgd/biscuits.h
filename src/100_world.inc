@@ -72,3 +72,39 @@ BS_API bs_status bs_world_init(bs_world *w, bs_arena *a, const bs_tables *tab,
   w->policy_cap = l.max_policies;
   return BS_OK;
 }
+
+/* Does every variable in the head appear somewhere in the body?
+ *
+ * The specification calls a rule that fails this invalid, and it is invalid
+ * on sight rather than on use: a rule whose body happens to match nothing
+ * would otherwise pass silently and become an error only once some later
+ * token supplied the missing fact. Checking at load time makes the verdict a
+ * property of the rule. */
+static bs_status bs_rule_bound(const bs_world *w, const bs_rule *r) {
+  uint32_t i;
+
+  for (i = 0; i < r->head.count; i++) {
+    bs_term t = w->terms[r->head.at + i];
+    uint32_t j;
+    int found = 0;
+
+    if (t.kind != (uint8_t)BS_T_VARIABLE) {
+      continue;
+    }
+    for (j = 0; j < r->body_count && !found; j++) {
+      const bs_predicate *p = &w->preds[r->body_at + j];
+      uint32_t k;
+      for (k = 0; k < p->count; k++) {
+        bs_term b = w->terms[p->at + k];
+        if (b.kind == (uint8_t)BS_T_VARIABLE && b.as.sym == t.as.sym) {
+          found = 1;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      return BS_ERR_UNBOUND;
+    }
+  }
+  return BS_OK;
+}

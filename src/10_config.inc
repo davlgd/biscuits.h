@@ -43,9 +43,16 @@
 
 /* Maximum number of blocks in a token, authority included. A Biscuit is
  * attenuated by appending blocks, so this bounds how far a token may have
- * travelled. Each block costs a signature verification. */
+ * travelled. Each block costs a signature verification.
+ *
+ * Sixty-three and not sixty-four: origins are a 64-bit set and the top bit is
+ * the authorizer's, so blocks own bits 0..62 and nothing else may. A block
+ * holding bit 63 would be indistinguishable from the authorizer, and since
+ * every authorizer rule trusts the authorizer by default, the last block of a
+ * full-length token would have been trusted as though the application had
+ * stated its facts itself. */
 #ifndef BS_MAX_BLOCKS
-#define BS_MAX_BLOCKS 64
+#define BS_MAX_BLOCKS 63
 #endif
 
 /* Every fallible entry point reports through its return value, so ignoring one

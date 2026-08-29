@@ -27,6 +27,7 @@ typedef enum bs_status {
   BS_ERR_SHADOWED, /* a closure parameter shadows a variable already in scope */
   BS_ERR_UNSUPPORTED, /* well-formed, but this build cannot handle it */
   BS_ERR_SIGNATURE,   /* a signature did not verify */
+  BS_ERR_UNBOUND,     /* a rule's head names a variable its body never binds */
   BS_STATUS_COUNT,    /* not a status; keep last */
 } bs_status;
 
@@ -442,7 +443,8 @@ typedef struct bs_predicate {
  * union is what `trusting` filters on, and getting it wrong does not fail --
  * it silently authorizes things.
  *
- * A bitset, because BS_MAX_BLOCKS is 64 and a union is then one OR. */
+ * A bitset, because a union is then one OR. Bits 0..62 are blocks and bit
+ * 63 is the authorizer, which is why BS_MAX_BLOCKS is 63 rather than 64. */
 typedef uint64_t bs_origin;
 
 #define BS_ORIGIN_NONE ((bs_origin)0)
@@ -450,7 +452,8 @@ typedef uint64_t bs_origin;
 
 /* The authorizer's own facts and rules are not in any block. They are given
  * the highest bit, which keeps `origin` a single word and keeps "authorizer"
- * expressible in a trust mask like any other source. */
+ * expressible in a trust mask like any other source. No block may hold this
+ * bit: see BS_MAX_BLOCKS. */
 #define BS_ORIGIN_AUTHORIZER BS_ORIGIN_ONE(63U)
 
 typedef struct bs_fact {
@@ -509,6 +512,12 @@ typedef struct bs_check {
   uint32_t query_count;
   uint8_t kind;
   uint32_t block; /* the block that stated it, for reporting */
+  /* How to render this check when it fails. A block's check is printed from
+   * its own encoding, by the printer the `blocks` conformance tier already
+   * exercises; the authorizer's is echoed back from the source the
+   * application wrote, because that is the text its author will recognise. */
+  bs_span src;
+  uint8_t from_text;
 } bs_check;
 
 #define BS_POLICY_ALLOW 0U
@@ -707,6 +716,47 @@ BS_API BS_MUST_USE bs_status bs_world_parse(bs_world *w, bs_symtab *syms,
                                             bs_arena *a, bs_span source,
                                             size_t block, const bs_token *token,
                                             const bs_tables *tab);
+
+/* --------------------------------------------------------------------------
+ * Authorization
+ * ----------------------------------------------------------------------- */
+
+#define BS_VERDICT_ALLOW 0U
+#define BS_VERDICT_DENY 1U
+#define BS_VERDICT_NO_POLICY 2U
+
+/* A check that did not hold, and enough to say which one. */
+typedef struct bs_failed_check {
+  uint32_t block; /* the block that stated it, or BS_MAX_BLOCKS: authorizer */
+  uint32_t index; /* which check within that block */
+  bs_span src;
+  uint8_t from_text; /* whether `src` is source text or an encoded check */
+} bs_failed_check;
+
+typedef struct bs_verdict {
+  uint8_t kind;    /* BS_VERDICT_* */
+  uint32_t policy; /* which policy decided, when one did */
+  uint8_t has_policy;
+  size_t failed_count;
+  const bs_failed_check *failed;
+} bs_verdict;
+
+/* Run the world to a fixpoint, evaluate every check, then every policy.
+ *
+ * A token is authorized when a policy allows it *and* no check failed. Those
+ * are separate conditions and both are reported: a caller that only looks at
+ * the policy will authorize a token whose checks all failed.
+ *
+ * The verdict's `failed` array is allocated from `a` and lives as long as the
+ * arena does. */
+BS_API BS_MUST_USE bs_status bs_authorize(bs_world *w, bs_symtab *syms,
+                                          bs_arena *a, size_t max_iterations,
+                                          bs_verdict *out);
+
+/* Render a failed check as the text its author would recognise. */
+BS_API BS_MUST_USE bs_status bs_failed_check_print(bs_writer *wr, bs_arena *a,
+                                                   const bs_tables *tab,
+                                                   const bs_failed_check *f);
 
 BS_API BS_MUST_USE bs_status bs_world_run(bs_world *w, bs_symtab *syms,
                                           bs_arena *a, size_t max_iterations);

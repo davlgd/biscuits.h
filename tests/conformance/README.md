@@ -102,7 +102,18 @@ function, easy to audit and to argue with.
 
 ## Scope
 
-The two ECDSA `secp256r1` cases (`test036`, `test037`) are out of scope for
-biscuits.h 1.0 and are expected to fail the `decode` tier with an explicit
-unsupported error rather than to be silently mis-verified. They still run: a
-skipped test hides a regression, an expected failure does not.
+Three of the thirty-eight tokens are out of scope for biscuits.h 1.0. They
+still run: a skipped test hides a regression, an expected failure does not.
+
+The two ECDSA `secp256r1` cases (`test036`, `test037`) fail the `decode` tier
+with an explicit unsupported error rather than being silently mis-verified.
+
+`test035_ffi.bc` calls `extern::test`, and external calls are
+implementation-defined: the specification says what the opcode is, not what
+any particular function means, and the reference's sample was produced by a
+harness that registered one. Supporting them needs a caller-supplied function
+pointer, and an indirect call is exactly what `tools/stack_usage.py` cannot
+follow -- so the worst-case stack figure would stop being a measurement and
+start being a measurement plus a promise. `biscuits.h` refuses `extern::` at
+both the parser and the evaluator rather than guessing, which is why this is a
+declared limit and not a wrong answer.

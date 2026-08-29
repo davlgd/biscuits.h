@@ -50,11 +50,29 @@ calling the result RFC 8032 verification was the error, and no amount of test
 vectors from RFC 8032 itself would have caught it, because RFC 8032's vectors
 do not include malleated signatures.
 
+**A block that could impersonate the authorizer.** Origins are a 64-bit set:
+each block owns a bit, and the authorizer owns one too. `BS_MAX_BLOCKS` was 64,
+so blocks owned bits 0 through 63 -- and `BS_ORIGIN_AUTHORIZER` was bit 63. A
+token attenuated to the full sixty-four blocks would have had its last block
+indistinguishable from the application's own authorizer, and since every
+authorizer rule trusts the authorizer by default, that block's facts would
+have been trusted as though the application had stated them itself. The bearer
+of any token could append blocks until they reached that position. Found while
+writing the authorizer, when the two constants had to be read side by side for
+the first time; fixed by capping blocks at 63 so bit 63 belongs to nothing
+else, and pinned by a test that walks every block index and asserts none of
+them collides.
+
+The lesson here is about arithmetic that reads as obviously right. "Sixty-four
+blocks, sixty-four bits" is the kind of correspondence that survives review
+precisely because it looks like a fit rather than a coincidence.
+
 **A stack figure that was never measured.** This documentation claimed the
-library ran in 4 KB of stack. The measured worst case is 6 864 bytes. The
+library ran in 4 KB of stack. The measured worst case is 6 592 bytes. The
 figure had been written from intuition; there is now a `make stack` target
 that computes it from the compiler's own frame sizes, and CI fails if it
-grows.
+grows. It has since refused three commits -- the regex engine, the text parser
+and the authorizer each arrived holding too much on the stack.
 
 ## The honest position
 
@@ -107,10 +125,10 @@ Claims without a number in this table are not yet claims.
 | Differential fuzzing vs `biscuit-rust` | Same input, both implementations, verdicts compared | not started |
 | Wire decoder bounded model checking | CBMC over the protobuf and base64 decoders | not started |
 | Constant-time secret handling | Valgrind/TIMECOP technique on the Linux job | not started |
-| Specification conformance | 36 of the 38 official sample tokens | decode 48/48, revocation ids 43/43, signatures 47/47, blocks 43/43; authorization not started |
+| Specification conformance | 35 of the 38 official sample tokens | decode 47/47, revocation ids 42/42, signatures 46/46, blocks 42/42, authorize 47/47 — every tier green, no failures |
 | Ed25519 against RFC 8032 vectors | `make unit`, positive and rejection cases | passing |
 | Signature malleability rejected | non-canonical scalars (S >= L) and small-order public keys refused, matching the reference's strict verification | passing, after a defect |
-| Worst-case stack bounded | `make stack` — compiler frame sizes over the call graph, exact because there is no recursion | 6 864 bytes, gated at 8 KB |
+| Worst-case stack bounded | `make stack` — compiler frame sizes over the call graph, exact because there is no recursion | 6 592 bytes, gated at 8 KB |
 | Ed25519 against Project Wycheproof | malleability and low-order points | not started |
 | Builds without bundled crypto | `make unbundled` | passing |
 
@@ -120,6 +138,12 @@ Out of scope for 1.0, and deliberately so:
 
 - **ECDSA `secp256r1`.** Roughly 2000 lines of constant-time curve arithmetic
   for two of the 38 conformance cases. Deferred to 1.1 rather than rushed.
+- **External calls (`extern::`) are refused.** The specification defines the
+  opcode, not the meaning of any particular function, and supporting them
+  needs a caller-supplied function pointer -- an indirect call, which is what
+  the worst-case stack measurement cannot follow. One conformance case
+  (`test035_ffi`) depends on them. Deferred to 1.1, and refused rather than
+  guessed in the meantime.
   Tokens using it are rejected with `BS_ERR_UNSUPPORTED`, never
   mis-verified as valid.
 - **Token minting and attenuation.** Verification is what runs at the edge and

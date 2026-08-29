@@ -649,6 +649,28 @@ typedef struct bs_machine {
 
 /* Push a frame for a closure's body, binding its parameter when it takes one.
  */
+/* How many elements a container has, and what the nth one is.
+ *
+ * A map is walked as key-value pairs, and its keys and values already sit
+ * adjacently in the term pool -- so the pair a closure receives is an array
+ * term pointing at those two, costing nothing to build and nothing to free.
+ * This is why the run holds them adjacently rather than in two runs. */
+static uint32_t bs_iter_count(bs_term subject) {
+  return (subject.kind == (uint8_t)BS_T_MAP) ? (subject.as.list.count / 2U)
+                                             : subject.as.list.count;
+}
+
+static bs_term bs_iter_at(const bs_world *w, bs_term subject, uint32_t index) {
+  bs_term out;
+  if (subject.kind != (uint8_t)BS_T_MAP) {
+    return w->terms[subject.as.list.at + index];
+  }
+  out.kind = (uint8_t)BS_T_ARRAY;
+  out.as.list.at = subject.as.list.at + (2U * index);
+  out.as.list.count = 2U;
+  return out;
+}
+
 static bs_status bs_enter_closure(bs_eval *e, bs_machine *m,
                                   uint32_t closure_op, const bs_term *arg) {
   const bs_op *op;
@@ -784,7 +806,7 @@ again:
         continue;
       }
       f->index++;
-      if (f->index >= f->subject.as.list.count) {
+      if (f->index >= bs_iter_count(f->subject)) {
         f->pending = (uint8_t)BS_PEND_NONE;
         st = bs_push(e, bs_bool(pend == (uint8_t)BS_PEND_ALL));
         if (st != BS_OK) {
@@ -792,8 +814,10 @@ again:
         }
         continue;
       }
-      st = bs_enter_closure(e, &m, f->closure,
-                            &e->w->terms[f->subject.as.list.at + f->index]);
+      {
+        bs_term item = bs_iter_at(e->w, f->subject, f->index);
+        st = bs_enter_closure(e, &m, f->closure, &item);
+      }
       if (st != BS_OK) {
         goto failed;
       }
@@ -1032,13 +1056,12 @@ again:
         st = BS_ERR_TYPE;
         goto failed;
       }
-      if (a.kind != (uint8_t)BS_T_SET && a.kind != (uint8_t)BS_T_ARRAY) {
-        /* A map is walked too, each entry passed as a two-element array;
-         * building that pair needs pool space and arrives with the rest of
-         * the container construction. */
-        return (a.kind == (uint8_t)BS_T_MAP) ? BS_ERR_UNSUPPORTED : BS_ERR_TYPE;
+      if (a.kind != (uint8_t)BS_T_SET && a.kind != (uint8_t)BS_T_ARRAY &&
+          a.kind != (uint8_t)BS_T_MAP) {
+        st = BS_ERR_TYPE;
+        goto failed;
       }
-      if (a.as.list.count == 0U) {
+      if (bs_iter_count(a) == 0U) {
         /* Vacuously true for all, vacuously false for any. */
         st = bs_push(e, bs_bool(op->kind == 25U));
         break;
@@ -1050,7 +1073,10 @@ again:
       f->closure = b.as.list.at;
       f->bind_base = m.bind_count;
       f->sp_base = e->sp;
-      st = bs_enter_closure(e, &m, b.as.list.at, &e->w->terms[a.as.list.at]);
+      {
+        bs_term item = bs_iter_at(e->w, a, 0U);
+        st = bs_enter_closure(e, &m, b.as.list.at, &item);
+      }
       break;
 
     case 27U:

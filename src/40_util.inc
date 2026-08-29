@@ -91,6 +91,7 @@ BS_API const char *bs_strstatus(bs_status st) {
       "shadowed variable",
       "unsupported by this build",
       "signature verification failed",
+      "rule head variable not bound by its body",
   };
   if ((unsigned int)st >= (unsigned int)BS_STATUS_COUNT) {
     return "unknown status";

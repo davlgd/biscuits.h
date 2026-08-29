@@ -911,7 +911,7 @@ static bs_status bs_p_scope(bs_parser *p, bs_origin *add) {
     for (i = 0; i < last && i < (size_t)BS_MAX_BLOCKS; i++) {
       *add |= BS_ORIGIN_ONE(i);
     }
-    return BS_OK == bs_p_advance(p) ? BS_OK : BS_ERR_MALFORMED;
+    return bs_p_advance(p);
   }
   if (p->tok.kind == (uint8_t)BS_TK_KEY) {
     uint8_t key[32];
@@ -959,9 +959,12 @@ static bs_status bs_p_trusting(bs_parser *p, bs_origin *trust) {
   if (st != BS_OK) {
     return st;
   }
-  /* The annotated set replaces the default, except for the always-trusted
-   * pair: a block always sees the authority and always sees itself. */
-  *trust = BS_ORIGIN_ONE(0U) | bs_p_self(p);
+  /* An annotation replaces the default rather than adding to it, and the
+   * authority is part of the default. Only the current block and the
+   * authorizer are always trusted -- so `trusting ed25519/...` does *not*
+   * keep seeing the authority, which is the difference between denying a
+   * policy and granting it. */
+  *trust = BS_ORIGIN_AUTHORIZER | bs_p_self(p);
   for (;;) {
     bs_origin add = BS_ORIGIN_NONE;
     st = bs_p_scope(p, &add);
@@ -1119,7 +1122,26 @@ static bs_status bs_p_queries(bs_parser *p, uint32_t *at, uint32_t *count) {
   return BS_OK;
 }
 
+/* The source a statement occupies, without the whitespace that followed it.
+ * The check printer works from an encoding; the authorizer has none, so a
+ * failing check is reported in the words its author wrote. */
+static bs_span bs_p_since(const bs_parser *p, size_t start) {
+  size_t end = p->tok.at;
+  bs_span out = bs_span_make(NULL, 0);
+
+  while (end > start) {
+    uint8_t c = 0;
+    if (!bs_span_at(p->lex.src, end - 1U, &c) || !bs_is_space(c)) {
+      break;
+    }
+    end--;
+  }
+  (void)bs_span_slice(p->lex.src, start, end - start, &out);
+  return out;
+}
+
 static bs_status bs_p_statement(bs_parser *p) {
+  size_t start = p->tok.at;
   bs_status st;
 
   /* check if ... / check all ... / reject if ... */
@@ -1155,6 +1177,8 @@ static bs_status bs_p_statement(bs_parser *p) {
       }
       c.kind = kind;
       c.block = (uint32_t)p->block;
+      c.src = bs_p_since(p, start);
+      c.from_text = 1;
       if (p->w->check_count >= p->w->check_cap) {
         return BS_ERR_NOMEM;
       }
@@ -1218,6 +1242,10 @@ static bs_status bs_p_statement(bs_parser *p) {
         return BS_ERR_NOMEM;
       }
       p->w->rules[p->w->rule_count] = r;
+      st = bs_rule_bound(p->w, &p->w->rules[p->w->rule_count]);
+      if (st != BS_OK) {
+        return st;
+      }
       p->w->rule_count++;
       return BS_OK;
     }
@@ -1268,7 +1296,7 @@ BS_API bs_status bs_world_parse(bs_world *w, bs_symtab *syms, bs_arena *a,
   p.token = token;
   p.tables = tab;
   p.block = block;
-  p.default_trust = BS_ORIGIN_ONE(0U) | bs_p_self(&p);
+  p.default_trust = BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | bs_p_self(&p);
   p.scratch_cap = (size_t)BS_PARSE_SCRATCH;
   p.scratch =
       (bs_op *)bs_arena_array(a, p.scratch_cap, sizeof(bs_op), BS_ALIGN_MAX);

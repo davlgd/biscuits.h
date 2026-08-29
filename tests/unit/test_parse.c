@@ -221,6 +221,11 @@ static void test_body_may_open_with_an_expression(void) {
 
 static void test_trust_annotations(void) {
   REQUIRE(parse("check if a($x) trusting authority") == BS_OK);
+  CHECK(W.rules[0].trust == (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U)));
+
+  /* With no annotation at all the authority is trusted, which is what makes
+   * the annotated case above a real difference rather than a spelling. */
+  REQUIRE(parse("check if a($x)") == BS_OK);
   CHECK((W.rules[0].trust & BS_ORIGIN_ONE(0U)) != BS_ORIGIN_NONE);
 
   REQUIRE(parse("check if a($x) trusting previous") == BS_OK);
@@ -231,7 +236,11 @@ static void test_trust_annotations(void) {
   REQUIRE(parse("check if a($x) trusting "
                 "ed25519/0000000000000000000000000000000000000000"
                 "000000000000000000000000") == BS_OK);
-  CHECK(W.rules[0].trust == (BS_ORIGIN_ONE(0U) | BS_ORIGIN_AUTHORIZER));
+  /* And not the authority either: an annotation replaces the default rather
+   * than adding to it, so naming a key that signed nothing trusts nothing
+   * beyond the authorizer itself. Keeping the authority here is the
+   * difference between a policy that denies and one that grants. */
+  CHECK(W.rules[0].trust == BS_ORIGIN_AUTHORIZER);
 }
 
 static void test_refusals(void) {

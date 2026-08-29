@@ -62,25 +62,27 @@ At `-O2` with clang on arm64, today:
 
 | Entry point | Deepest path |
 |---|---|
-| `bs_world_run` | **6 864 bytes** |
-| `bs_token_verify` | 6 592 bytes |
+| `bs_token_verify` | **6 592 bytes** |
+| `bs_authorize` | 5 584 bytes |
 | `bs_block_print` | 2 752 bytes |
-| `bs_world_parse` | 2 240 bytes |
+| `bs_world_parse` | 2 624 bytes |
 
 An earlier version of this document claimed 4 KB. That figure was never
-measured and was wrong; on the verification path the vendored curve arithmetic
-alone accounts for more than half of the real number, with `bs_na_add` at
-1 728 bytes and `bs_ed25519_verify_parts` at 2 128. Defining
-`BISCUITS_NO_BUNDLED_CRYPTO` removes that path, but not the worst case:
-evaluation is deeper than verification.
+measured and was wrong; the vendored curve arithmetic alone accounts for more
+than half of the real number, with `bs_na_add` at 1 728 bytes and
+`bs_ed25519_verify_parts` at 2 128. Defining `BISCUITS_NO_BUNDLED_CRYPTO`
+removes that path and leaves `bs_authorize` as the worst case.
 
 `make stack` fails above 8 KB, so growth is visible rather than discovered,
-and it has caught growth twice. The regex engine first held its thread lists
-as locals and pushed the total to 8 896 bytes; they moved to the arena. The
-text parser first held its term buffers the same way and reached 8 368; they
-moved too, which is why `bs_world_parse` now sits at 2 240. In both cases the
-tool objected before the commit, which is the only reason these are
-paragraphs rather than incidents.
+and it has caught growth three times. The regex engine first held its thread
+lists as locals and reached 8 896 bytes; they moved to the arena. The text
+parser held its term buffers the same way and reached 8 368; they moved too.
+The authorizer reached 9 232 because the Datalog solver -- one frame per body
+position, one slot per binding -- was a local at two levels of the same call
+path, though never live at both; it moved to the arena and is now passed down,
+which brought the evaluation path below where it had been before the
+authorizer existed. Each time the tool objected before the commit, which is
+the only reason these are paragraphs rather than incidents.
 
 ### 3. Bounded loops
 

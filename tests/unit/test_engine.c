@@ -252,7 +252,25 @@ static void test_head_variable_must_be_bound(void) {
   (void)add_rule(pred(S_B, t_var(V_Y), t_var(V_Y), 1U),
                  pred(S_A, t_var(V_X), t_var(V_X), 1U), 1U,
                  BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U));
-  CHECK(bs_world_run(&W, &SYMS, &A, 0U) == BS_ERR_MALFORMED);
+  /* The loaders reject such a rule on sight; this world was built straight
+   * into the pools and so reaches the evaluator's own guard instead. Both
+   * answer the same, which is the point of keeping the guard. */
+  CHECK(bs_rule_bound(&W, &W.rules[0]) == BS_ERR_UNBOUND);
+  CHECK(bs_world_run(&W, &SYMS, &A, 0U) == BS_ERR_UNBOUND);
+}
+
+/* Invalid on sight: a rule whose body matches nothing is still invalid, and
+ * an implementation that only notices when the rule fires would accept it
+ * until some later token happened to supply the missing fact. */
+static void
+test_unbound_head_is_rejected_even_when_the_body_never_matches(void) {
+  REQUIRE(reset_world());
+  (void)add_rule(pred(S_B, t_var(V_Y), t_var(V_Y), 1U),
+                 pred(S_A, t_var(V_X), t_var(V_X), 1U), 1U,
+                 BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U));
+  CHECK(W.fact_count == 0U);
+  CHECK(bs_rule_bound(&W, &W.rules[0]) == BS_ERR_UNBOUND);
+  CHECK(bs_world_run(&W, &SYMS, &A, 0U) == BS_OK);
 }
 
 static void test_queries_do_not_derive(void) {
@@ -333,6 +351,7 @@ int main(void) {
   test_join_on_a_shared_variable();
   test_transitive_closure_reaches_a_fixpoint();
   test_head_variable_must_be_bound();
+  test_unbound_head_is_rejected_even_when_the_body_never_matches();
   test_queries_do_not_derive();
   test_iteration_limit();
   test_pool_exhaustion_is_reported();
