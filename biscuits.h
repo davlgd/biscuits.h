@@ -564,6 +564,227 @@ bs_status bs_ed25519_public_from_secret(bs_span seed, uint8_t out[32]);
 BS_API BS_MUST_USE bs_status bs_token_verify(const bs_token *t,
                                              bs_span root_key);
 
+/* ---------------------------------------------------------------------------
+ * The world
+ *
+ * Everything so far has read the wire format in place: decode a span, print
+ * it, never build anything. That works for printing and it does not work for
+ * evaluation, because Datalog generates facts that were never on any wire,
+ * and because it has to compare facts that arrived from different blocks.
+ *
+ * So this is the in-memory form, and it is deliberately flat. Terms, ops,
+ * predicates, facts and rules each live in one arena-allocated pool, and
+ * everything refers to everything else by index rather than by pointer. Three
+ * reasons, in order of how much they matter:
+ *
+ *   - Comparing two facts is comparing two runs of a pool, which is what the
+ *     fixpoint loop does more than anything else.
+ *   - An index is stable when a pool is refilled; a pointer is not.
+ *   - There is nothing to free, which is the whole arena story, and nothing
+ *     that can dangle.
+ *
+ * The cost is that reading this code means holding "index into which pool?"
+ * in your head. The pools are named for what they hold, and every index field
+ * says which pool it indexes.
+ * ------------------------------------------------------------------------ */
+
+/* Term kinds, matching the wire format's oneof but numbered independently:
+ * the wire numbers are field tags and would tie this representation to the
+ * encoding it is meant to be free of. */
+#define BS_T_VARIABLE 0U
+#define BS_T_INTEGER 1U
+#define BS_T_STRING 2U
+#define BS_T_DATE 3U
+#define BS_T_BYTES 4U
+#define BS_T_BOOL 5U
+#define BS_T_SET 6U
+#define BS_T_NULL 7U
+#define BS_T_ARRAY 8U
+#define BS_T_MAP 9U
+
+typedef struct bs_term {
+  uint8_t kind;
+  union {
+    uint64_t sym; /* BS_T_VARIABLE, BS_T_STRING: a symbol table index */
+    int64_t integer;
+    uint64_t date; /* seconds since the epoch, unsigned per the specification */
+    bs_span bytes; /* borrowed from the token, never copied */
+    int boolean;
+    /* SET, ARRAY: a run in the term pool. MAP: a run of key/value pairs,
+     * stored adjacently, so count is always even. */
+    struct {
+      uint32_t at;
+      uint32_t count;
+    } list;
+  } as;
+} bs_term;
+
+/* `name(t0, t1, ...)`, with the terms in a run of the term pool. */
+typedef struct bs_predicate {
+  uint64_t name; /* symbol table index */
+  uint32_t at;   /* into the term pool */
+  uint32_t count;
+} bs_predicate;
+
+/* Which blocks a fact came from.
+ *
+ * A fact stated in block n has origin {n}. A fact a rule produced has the
+ * union of the rule's block and the origins of every fact it matched. That
+ * union is what `trusting` filters on, and getting it wrong does not fail --
+ * it silently authorizes things.
+ *
+ * A bitset, because BS_MAX_BLOCKS is 64 and a union is then one OR. */
+typedef uint64_t bs_origin;
+
+#define BS_ORIGIN_NONE ((bs_origin)0)
+#define BS_ORIGIN_ONE(block) ((bs_origin)1 << (block))
+
+/* The authorizer's own facts and rules are not in any block. They are given
+ * the highest bit, which keeps `origin` a single word and keeps "authorizer"
+ * expressible in a trust mask like any other source. */
+#define BS_ORIGIN_AUTHORIZER BS_ORIGIN_ONE(63U)
+
+typedef struct bs_fact {
+  bs_predicate pred;
+  bs_origin origin;
+} bs_fact;
+
+/* An expression, as a run of the op pool. Ops are postfix, exactly as the
+ * wire format carries them -- and exactly what the text parser will produce,
+ * so the evaluator has one input shape rather than two. */
+typedef struct bs_expr {
+  uint32_t at;
+  uint32_t count;
+} bs_expr;
+
+#define BS_OP_VALUE 0U
+#define BS_OP_UNARY 1U
+#define BS_OP_BINARY 2U
+#define BS_OP_CLOSURE 3U
+
+typedef struct bs_op {
+  uint8_t tag;
+  uint32_t kind;  /* the unary or binary opcode */
+  uint64_t ffi;   /* symbol index of an external call's name */
+  uint32_t term;  /* BS_OP_VALUE: into the term pool */
+  uint32_t at;    /* BS_OP_CLOSURE: parameters, into the symbol run pool */
+  uint32_t count; /* BS_OP_CLOSURE: parameter count */
+  bs_expr body;   /* BS_OP_CLOSURE: the closure's own ops */
+} bs_op;
+
+typedef struct bs_rule {
+  bs_predicate head;
+  uint32_t body_at; /* into the predicate pool */
+  uint32_t body_count;
+  uint32_t expr_at; /* into the expression pool */
+  uint32_t expr_count;
+  bs_origin trust; /* which blocks this rule's premises may come from */
+  uint32_t block;  /* the block that stated it */
+} bs_rule;
+
+#define BS_CHECK_KIND_ONE 0U
+#define BS_CHECK_KIND_ALL 1U
+#define BS_CHECK_KIND_REJECT 2U
+
+typedef struct bs_check {
+  uint32_t query_at; /* into the rule pool: one rule per query */
+  uint32_t query_count;
+  uint8_t kind;
+  uint32_t block; /* the block that stated it, for reporting */
+} bs_check;
+
+#define BS_POLICY_ALLOW 0U
+#define BS_POLICY_DENY 1U
+
+typedef struct bs_policy {
+  uint32_t query_at;
+  uint32_t query_count;
+  uint8_t kind;
+} bs_policy;
+
+/* The pools.
+ *
+ * Sized once from the caller's arena and never grown: the counting pass that
+ * fills each capacity runs before anything is allocated, which is what lets
+ * the arena stay a bump allocator with no growth strategy anywhere.
+ *
+ * Every `*_count` is how much is used; every `*_cap` is how much was
+ * reserved. Running out is BS_ERR_NOMEM, and it is the caller's arena that
+ * ran out, not the library's. */
+typedef struct bs_world {
+  bs_term *terms;
+  size_t term_count;
+  size_t term_cap;
+
+  bs_op *ops;
+  size_t op_count;
+  size_t op_cap;
+
+  bs_expr *exprs;
+  size_t expr_count;
+  size_t expr_cap;
+
+  bs_predicate *preds; /* rule bodies */
+  size_t pred_count;
+  size_t pred_cap;
+
+  uint64_t *syms; /* closure parameter runs */
+  size_t sym_count;
+  size_t sym_cap;
+
+  bs_fact *facts;
+  size_t fact_count;
+  size_t fact_cap;
+
+  bs_rule *rules;
+  size_t rule_count;
+  size_t rule_cap;
+
+  bs_check *checks;
+  size_t check_count;
+  size_t check_cap;
+
+  bs_policy *policies;
+  size_t policy_count;
+  size_t policy_cap;
+
+  const bs_tables *tables; /* symbols and public keys, borrowed */
+  size_t block_count;
+} bs_world;
+
+/* Reserve every pool in one go.
+ *
+ * The capacities are the caller's to choose because only the caller knows
+ * what it is willing to spend. A gateway with a 64 KB scratch buffer and a
+ * batch job with a megabyte want different answers, and a library that picks
+ * for them is wrong for one of them. */
+typedef struct bs_limits {
+  size_t max_terms;
+  size_t max_ops;
+  size_t max_exprs;
+  size_t max_preds;
+  size_t max_syms;
+  size_t max_facts;
+  size_t max_rules;
+  size_t max_checks;
+  size_t max_policies;
+  size_t
+      max_iterations; /* fixpoint rounds, per the specification's run limits */
+} bs_limits;
+
+/* Defaults sized for the tokens the specification's own suite contains, with
+ * room to spare. A starting point, not a recommendation: measure with
+ * bs_arena_peak() against your own traffic. */
+BS_API BS_MUST_USE bs_limits bs_limits_default(void);
+
+/* Reserve the pools from the arena. Everything the evaluator will need is
+ * allocated here and never grown, so an arena that survives this call is an
+ * arena that cannot run out later. */
+BS_API BS_MUST_USE bs_status bs_world_init(bs_world *w, bs_arena *a,
+                                           const bs_tables *tab,
+                                           size_t block_count,
+                                           const bs_limits *lim);
+
 /* ===========================================================================
  * 30_impl_open.inc
  * ======================================================================== */
@@ -4470,6 +4691,85 @@ BS_API bs_status bs_block_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
   }
 
   return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
+}
+
+/* ===========================================================================
+ * 100_world.inc
+ * ======================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * The world -- pool allocation
+ *
+ * The types live in the API section; what is here is the one function that
+ * reserves them. See the commentary there for why everything is an index into
+ * a flat pool rather than a pointer.
+ * ------------------------------------------------------------------------ */
+
+BS_API bs_limits bs_limits_default(void) {
+  bs_limits l;
+  l.max_terms = 4096U;
+  l.max_ops = 4096U;
+  l.max_exprs = 512U;
+  l.max_preds = 1024U;
+  l.max_syms = 512U;
+  l.max_facts = 1024U;
+  l.max_rules = 256U;
+  l.max_checks = 256U;
+  l.max_policies = 64U;
+  l.max_iterations = 100U;
+  return l;
+}
+
+BS_API bs_status bs_world_init(bs_world *w, bs_arena *a, const bs_tables *tab,
+                               size_t block_count, const bs_limits *lim) {
+  bs_limits l;
+
+  if (w == NULL || a == NULL || tab == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  if (block_count > (size_t)BS_MAX_BLOCKS) {
+    return BS_ERR_LIMIT;
+  }
+  l = (lim == NULL) ? bs_limits_default() : *lim;
+
+  memset(w, 0, sizeof *w);
+  w->tables = tab;
+  w->block_count = block_count;
+
+  w->terms =
+      (bs_term *)bs_arena_array(a, l.max_terms, sizeof(bs_term), BS_ALIGN_MAX);
+  w->ops = (bs_op *)bs_arena_array(a, l.max_ops, sizeof(bs_op), BS_ALIGN_MAX);
+  w->exprs =
+      (bs_expr *)bs_arena_array(a, l.max_exprs, sizeof(bs_expr), BS_ALIGN_MAX);
+  w->preds = (bs_predicate *)bs_arena_array(a, l.max_preds,
+                                            sizeof(bs_predicate), BS_ALIGN_MAX);
+  w->syms =
+      (uint64_t *)bs_arena_array(a, l.max_syms, sizeof(uint64_t), BS_ALIGN_MAX);
+  w->facts =
+      (bs_fact *)bs_arena_array(a, l.max_facts, sizeof(bs_fact), BS_ALIGN_MAX);
+  w->rules =
+      (bs_rule *)bs_arena_array(a, l.max_rules, sizeof(bs_rule), BS_ALIGN_MAX);
+  w->checks = (bs_check *)bs_arena_array(a, l.max_checks, sizeof(bs_check),
+                                         BS_ALIGN_MAX);
+  w->policies = (bs_policy *)bs_arena_array(a, l.max_policies,
+                                            sizeof(bs_policy), BS_ALIGN_MAX);
+
+  if (w->terms == NULL || w->ops == NULL || w->exprs == NULL ||
+      w->preds == NULL || w->syms == NULL || w->facts == NULL ||
+      w->rules == NULL || w->checks == NULL || w->policies == NULL) {
+    return BS_ERR_NOMEM;
+  }
+
+  w->term_cap = l.max_terms;
+  w->op_cap = l.max_ops;
+  w->expr_cap = l.max_exprs;
+  w->pred_cap = l.max_preds;
+  w->sym_cap = l.max_syms;
+  w->fact_cap = l.max_facts;
+  w->rule_cap = l.max_rules;
+  w->check_cap = l.max_checks;
+  w->policy_cap = l.max_policies;
+  return BS_OK;
 }
 
 /* ===========================================================================

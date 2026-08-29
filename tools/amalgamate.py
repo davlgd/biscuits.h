@@ -39,6 +39,7 @@ PARTS = [
     "85_block.inc",
     "90_expr.inc",
     "95_datalog.inc",
+    "100_world.inc",
     "99_epilogue.inc",
 ]
 

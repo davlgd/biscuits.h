@@ -124,8 +124,9 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Expression printer | done — opcode stream back to source, closures included |
 | Block and Datalog printer | done — **43/43** on the blocks tier |
 | Ed25519 verification | done — **47/47** on the signatures tier |
-| Base64url | not started |
-| Datalog engine | not started |
+| Base64url | done — strict, with its own fuzz target |
+| Datalog world and pools | done — flat index-addressed pools, reserved once |
+| Datalog engine | in progress |
 | Expression VM | not started |
 | Datalog text parser | not started |
 | Authorizer | not started |
@@ -143,8 +144,8 @@ tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         4485 lines
-object -Os    37560 bytes
+header         4785 lines
+object -Os    38608 bytes
 ```
 <!-- metrics:end -->
 

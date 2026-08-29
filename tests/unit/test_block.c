@@ -318,6 +318,80 @@ static void test_scope_printing(void) {
   CHECK(bs_scope_print(&W, &tab, span_of(&s)) == BS_ERR_MALFORMED);
 }
 
+/* --------------------------------------------------------------------------
+ * The world
+ * ----------------------------------------------------------------------- */
+
+static void test_world_reserves_everything_up_front(void) {
+  static uint8_t big[512 * 1024];
+  bs_arena a;
+  bs_world w;
+  bs_limits lim = bs_limits_default();
+
+  /* The point of reserving every pool at init is that an arena which survives
+   * this call cannot run out later: there is no growth step anywhere in the
+   * evaluator to fail at an awkward moment. */
+  REQUIRE(bs_arena_init(&a, big, sizeof big) == BS_OK);
+  REQUIRE(bs_world_init(&w, &a, &TAB, 2U, &lim) == BS_OK);
+  CHECK(w.term_cap == lim.max_terms);
+  CHECK(w.fact_cap == lim.max_facts);
+  CHECK(w.term_count == 0U && w.fact_count == 0U && w.rule_count == 0U);
+  CHECK(w.tables == &TAB);
+  CHECK(w.block_count == 2U);
+
+  /* An arena too small reports exhaustion here, where the caller can still do
+   * something about it, rather than midway through evaluating a token. */
+  {
+    uint8_t small[1024];
+    bs_arena tiny;
+    REQUIRE(bs_arena_init(&tiny, small, sizeof small) == BS_OK);
+    CHECK(bs_world_init(&w, &tiny, &TAB, 1U, &lim) == BS_ERR_NOMEM);
+  }
+
+  /* Smaller limits fit in a smaller arena: the caller decides what to spend. */
+  {
+    uint8_t modest[16 * 1024];
+    bs_arena m;
+    bs_limits small = bs_limits_default();
+    small.max_terms = 64U;
+    small.max_ops = 64U;
+    small.max_exprs = 16U;
+    small.max_preds = 32U;
+    small.max_syms = 16U;
+    small.max_facts = 32U;
+    small.max_rules = 8U;
+    small.max_checks = 8U;
+    small.max_policies = 4U;
+    REQUIRE(bs_arena_init(&m, modest, sizeof modest) == BS_OK);
+    CHECK(bs_world_init(&w, &m, &TAB, 1U, &small) == BS_OK);
+    CHECK(w.term_cap == 64U);
+  }
+
+  /* More blocks than a bs_origin bitset can name. */
+  REQUIRE(bs_arena_init(&a, big, sizeof big) == BS_OK);
+  CHECK(bs_world_init(&w, &a, &TAB, (size_t)BS_MAX_BLOCKS + 1U, &lim) ==
+        BS_ERR_LIMIT);
+
+  CHECK(bs_world_init(NULL, &a, &TAB, 1U, &lim) == BS_ERR_ARGUMENT);
+  CHECK(bs_world_init(&w, NULL, &TAB, 1U, &lim) == BS_ERR_ARGUMENT);
+  CHECK(bs_world_init(&w, &a, NULL, 1U, &lim) == BS_ERR_ARGUMENT);
+}
+
+static void test_origin_bitset(void) {
+  /* The origin of a fact is the set of blocks that allowed it to exist, and
+   * `trusting` filters on it. A bitset because the block ceiling is 64, which
+   * makes the union a single OR -- the operation the fixpoint loop performs
+   * more than any other. */
+  CHECK(BS_ORIGIN_ONE(0U) == 1U);
+  CHECK(BS_ORIGIN_ONE(1U) == 2U);
+  CHECK((BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(3U)) == 9U);
+  CHECK(BS_ORIGIN_NONE == 0U);
+  /* The authorizer is not a block, and gets the top bit so that it stays
+   * expressible in a trust mask like any other source. */
+  CHECK(BS_ORIGIN_AUTHORIZER == BS_ORIGIN_ONE(63U));
+  CHECK((BS_ORIGIN_AUTHORIZER & BS_ORIGIN_ONE(0U)) == 0U);
+}
+
 int main(void) {
   tables_for_tests();
   test_symbol_indices_span_the_whole_token();
@@ -325,5 +399,7 @@ int main(void) {
   test_predicate_printing();
   test_fact_printing();
   test_scope_printing();
+  test_world_reserves_everything_up_front();
+  test_origin_bitset();
   return bs_test_finish();
 }
