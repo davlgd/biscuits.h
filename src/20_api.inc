@@ -182,3 +182,60 @@ BS_API bs_status bs_token_parse(bs_arena *a, bs_span input, bs_token *out);
 /* The revocation identifier of a block: its signature, verbatim. Returns an
  * empty span for an out-of-range index. */
 BS_API bs_span bs_token_revocation_id(const bs_token *t, size_t index);
+
+/* ---------------------------------------------------------------------------
+ * Output writer
+ *
+ * Rendering Datalog needs somewhere to put the bytes, and this library does
+ * not allocate. The caller supplies the buffer; overflow is sticky and
+ * reported once at the end rather than checked on every append.
+ * ------------------------------------------------------------------------ */
+
+typedef struct bs_writer {
+  uint8_t *buf;
+  size_t cap;
+  size_t len;
+  int overflow;
+} bs_writer;
+
+BS_API bs_status bs_writer_init(bs_writer *w, void *buf, size_t cap);
+BS_API int bs_writer_overflow(const bs_writer *w);
+BS_API size_t bs_writer_len(const bs_writer *w);
+
+/* ---------------------------------------------------------------------------
+ * Symbol table
+ *
+ * Predicate names and string terms travel as indices. Indices below 1024 name
+ * a well-known symbol shared by every implementation; the rest name a symbol
+ * the token carries, numbered across all its blocks in order.
+ *
+ * `entries` is not owned: it points at spans into the token's own bytes.
+ * ------------------------------------------------------------------------ */
+
+typedef struct bs_symbols {
+  const bs_span *entries; /* token-provided symbols, in block order */
+  size_t count;
+} bs_symbols;
+
+/* Resolve an index to its text. Returns 0 for an index this build cannot
+ * name, which includes a reserved index a future specification may define --
+ * guessing would make the token read differently here than elsewhere. */
+BS_API int bs_symbol_get(const bs_symbols *s, uint64_t index, bs_span *out);
+
+/* How many well-known symbols this build knows. */
+BS_API size_t bs_symbol_default_count(void);
+
+/* ---------------------------------------------------------------------------
+ * Datalog rendering
+ * ------------------------------------------------------------------------ */
+
+/* Render one encoded Term as Datalog source into `w`.
+ *
+ * `term` is the bytes of a protobuf Term message, as they appear inside a
+ * block. Nesting deeper than BS_MAX_DEPTH returns BS_ERR_DEPTH rather than
+ * consuming stack.
+ *
+ * On any error the bytes already written to `w` are undefined: the caller
+ * discards the whole rendering, never a prefix of it. */
+BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
+                               bs_span term);

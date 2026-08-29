@@ -29,6 +29,9 @@ PARTS = [
     "40_util.inc",
     "50_pb.inc",
     "60_token.inc",
+    "70_writer.inc",
+    "75_symbols.inc",
+    "80_term.inc",
     "99_epilogue.inc",
 ]
 

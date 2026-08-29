@@ -15,49 +15,7 @@
 
 #include "bs_test.h"
 
-/* --------------------------------------------------------------------------
- * A tiny protobuf writer, so the tests read as the messages they describe
- * rather than as hex dumps.
- * ----------------------------------------------------------------------- */
-
-typedef struct buf {
-  uint8_t b[512];
-  size_t n;
-} buf;
-
-static void put(buf *w, uint8_t byte) {
-  if (w->n < sizeof w->b) {
-    w->b[w->n++] = byte;
-  }
-}
-
-static void put_varint(buf *w, uint64_t v) {
-  do {
-    uint8_t byte = (uint8_t)(v & 0x7FU);
-    v >>= 7U;
-    if (v != 0U) {
-      byte |= 0x80U;
-    }
-    put(w, byte);
-  } while (v != 0U);
-}
-
-static void put_tag(buf *w, uint32_t field, uint32_t wire) {
-  put_varint(w, ((uint64_t)field << 3U) | wire);
-}
-
-static void put_bytes(buf *w, uint32_t field, const uint8_t *p, size_t n) {
-  size_t i;
-  put_tag(w, field, BS_PB_BYTES);
-  put_varint(w, n);
-  for (i = 0; i < n; i++) {
-    put(w, p[i]);
-  }
-}
-
-static bs_span span_of(const buf *w) {
-  return bs_span_make(w->b, w->n);
-}
+#include "pb_build.h"
 
 /* --------------------------------------------------------------------------
  * Varints
