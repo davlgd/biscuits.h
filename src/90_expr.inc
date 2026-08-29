@@ -496,14 +496,26 @@ BS_API bs_status bs_expr_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
   uint32_t *stack = NULL;
   uint32_t root = 0;
   size_t count = 0;
+  size_t mark;
   bs_status st;
 
   if (w == NULL || a == NULL || tab == NULL) {
     return BS_ERR_ARGUMENT;
   }
+
+  /* The node array and the traversal stack are scratch: they are dead the
+   * moment the rendering is written, and nothing published outward points
+   * into them -- bs_enode.payload spans point at the token's own bytes, never
+   * at the arena. So the arena is rewound on the way out.
+   *
+   * The bound is generous by design (half the expression's length, where a
+   * typical expression needs a tenth of that), which is fine for one
+   * expression and would not be for the twenty in a block. */
+  mark = bs_arena_mark(a);
   st = bs_expr_build(a, expr, &nodes, &stack, &root, &count);
-  if (st != BS_OK) {
-    return st;
+  if (st == BS_OK) {
+    st = bs_expr_emit(w, tab, nodes, count, root, stack, (expr.n / 2U) + 1U);
   }
-  return bs_expr_emit(w, tab, nodes, count, root, stack, (expr.n / 2U) + 1U);
+  bs_arena_rewind(a, mark);
+  return st;
 }

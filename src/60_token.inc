@@ -401,3 +401,24 @@ BS_API bs_span bs_token_revocation_id(const bs_token *t, size_t index) {
   /* The revocation identifier for a block is its signature, verbatim. */
   return t->blocks[index].signature;
 }
+
+/* Decode a token from its text form and parse it.
+ *
+ * This is how a Biscuit actually arrives: URL-safe base64, sometimes with a
+ * `biscuit:` prefix when the surrounding context does not already say what it
+ * is. The decoded bytes are allocated from the arena, so the returned token's
+ * spans point into arena memory rather than into the caller's string -- which
+ * means the arena, not the text, is what must outlive the token. */
+BS_API bs_status bs_token_parse_text(bs_arena *a, bs_span text, bs_token *out) {
+  bs_span raw;
+  bs_status st;
+
+  if (a == NULL || out == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  st = bs_base64url_decode(a, text, &raw);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_token_parse(a, raw, out);
+}

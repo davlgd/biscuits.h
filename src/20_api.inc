@@ -186,6 +186,23 @@ typedef struct bs_token {
 BS_API BS_MUST_USE bs_status bs_token_parse(bs_arena *a, bs_span input,
                                             bs_token *out);
 
+/* Decode a token from its text form -- URL-safe base64, with an optional
+ * `biscuit:` prefix -- and parse it. The decoded bytes come from the arena, so
+ * the arena rather than the text is what must outlive the token. */
+BS_API BS_MUST_USE bs_status bs_token_parse_text(bs_arena *a, bs_span text,
+                                                 bs_token *out);
+
+/* Decode URL-safe base64 into arena memory.
+ *
+ * Strict: padding must be canonical, the bits a partial final group leaves
+ * over must be zero, and whitespace is not skipped. A lenient decoder accepts
+ * several strings for one token, which turns "have I seen this token before?"
+ * into a question with more than one answer -- and any cache, rate limiter or
+ * deny-list keyed on the string form is then wrong in a way nobody notices
+ * until it matters. */
+BS_API BS_MUST_USE bs_status bs_base64url_decode(bs_arena *a, bs_span text,
+                                                 bs_span *out);
+
 /* The revocation identifier of a block: its signature, verbatim. Returns an
  * empty span for an out-of-range index. */
 BS_API BS_MUST_USE bs_span bs_token_revocation_id(const bs_token *t,

@@ -48,70 +48,73 @@ static const uint8_t BS_B64URL[256] = {
     0xFF, 0xFF, 0xFF, 0xFF,
 };
 
-/* Strip the optional `biscuit:` prefix. */
-static bs_span bs_strip_prefix(bs_span text) {
+/* Length of the optional `biscuit:` prefix, or zero.
+ *
+ * Returns an offset rather than a re-based span deliberately. Slicing would
+ * hand back a pointer into the middle of the caller's buffer, and every index
+ * afterwards would be relative to a base the reader has to track separately.
+ * One origin, one set of indices. */
+static size_t bs_prefix_len(bs_span text) {
   bs_span head;
-  bs_span rest;
   bs_span want = bs_span_make("" BS_TOKEN_PREFIX, sizeof BS_TOKEN_PREFIX - 1U);
 
   if (!bs_span_slice(text, 0U, want.n, &head) || !bs_span_eq(head, want)) {
-    return text;
+    return 0U;
   }
-  if (!bs_span_slice(text, want.n, text.n - want.n, &rest)) {
-    return text;
-  }
-  return rest;
+  return want.n;
 }
 
 BS_API bs_status bs_base64url_decode(bs_arena *a, bs_span text, bs_span *out) {
-  bs_span body;
+  size_t start;
+  size_t stop; /* one past the last character of the encoded body */
+  size_t len;
   size_t groups;
   size_t tail;
   size_t capacity;
   uint8_t *buf;
   size_t written = 0;
-  size_t i;
 
   if (a == NULL || out == NULL) {
     return BS_ERR_ARGUMENT;
   }
 
-  body = bs_strip_prefix(text);
+  /* Everything below indexes `text` directly, between `start` and `stop`.
+   * There is one buffer and one origin throughout. */
+  start = bs_prefix_len(text);
+  stop = text.n;
 
-  /* Count the padding, which may only appear as the last one or two
-   * characters of the last group. */
+  /* Padding, which may only be the last one or two characters. */
   tail = 0;
-  while (tail < 2U && body.n > tail) {
+  while (tail < 2U && stop > start) {
     uint8_t c = 0;
-    if (!bs_span_at(body, body.n - tail - 1U, &c) || c != (uint8_t)'=') {
+    if (!bs_span_at(text, stop - 1U, &c) || c != (uint8_t)'=') {
       break;
     }
+    stop--;
     tail++;
   }
-  if (body.n < tail) {
-    return BS_ERR_MALFORMED;
-  }
-  body.n -= tail;
+  BS_ASSERT(stop >= start);
+  len = stop - start;
 
   /* With padding present the encoding is a whole number of four-character
    * groups; without it, a final group of two or three characters is allowed.
    * A final group of one is not: it carries no complete byte. */
-  if (tail != 0U && ((body.n + tail) % 4U) != 0U) {
+  if (tail != 0U && ((len + tail) % 4U) != 0U) {
     return BS_ERR_MALFORMED;
   }
-  if ((body.n % 4U) == 1U) {
+  if ((len % 4U) == 1U) {
     return BS_ERR_MALFORMED;
   }
-  if (tail == 1U && (body.n % 4U) != 3U) {
+  if (tail == 1U && (len % 4U) != 3U) {
     return BS_ERR_MALFORMED;
   }
-  if (tail == 2U && (body.n % 4U) != 2U) {
+  if (tail == 2U && (len % 4U) != 2U) {
     return BS_ERR_MALFORMED;
   }
 
-  groups = body.n / 4U;
+  groups = len / 4U;
   capacity = groups * 3U;
-  switch (body.n % 4U) {
+  switch (len % 4U) {
   case 2U:
     capacity += 1U;
     break;
@@ -130,10 +133,13 @@ BS_API bs_status bs_base64url_decode(bs_arena *a, bs_span text, bs_span *out) {
   {
     uint32_t acc = 0;
     unsigned int bits = 0;
-    for (i = 0; i < body.n; i++) {
+    size_t i;
+    for (i = start; i < stop; i++) {
       uint8_t c = 0;
       uint8_t v;
-      (void)bs_span_at(body, i, &c);
+      if (!bs_span_at(text, i, &c)) {
+        return BS_ERR_MALFORMED;
+      }
       v = BS_B64URL[c];
       if (v == 0xFFU) {
         /* Whitespace included: a decoder that skips it accepts several

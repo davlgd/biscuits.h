@@ -384,6 +384,23 @@ typedef struct bs_token {
 BS_API BS_MUST_USE bs_status bs_token_parse(bs_arena *a, bs_span input,
                                             bs_token *out);
 
+/* Decode a token from its text form -- URL-safe base64, with an optional
+ * `biscuit:` prefix -- and parse it. The decoded bytes come from the arena, so
+ * the arena rather than the text is what must outlive the token. */
+BS_API BS_MUST_USE bs_status bs_token_parse_text(bs_arena *a, bs_span text,
+                                                 bs_token *out);
+
+/* Decode URL-safe base64 into arena memory.
+ *
+ * Strict: padding must be canonical, the bits a partial final group leaves
+ * over must be zero, and whitespace is not skipped. A lenient decoder accepts
+ * several strings for one token, which turns "have I seen this token before?"
+ * into a question with more than one answer -- and any cache, rate limiter or
+ * deny-list keyed on the string form is then wrong in a way nobody notices
+ * until it matters. */
+BS_API BS_MUST_USE bs_status bs_base64url_decode(bs_arena *a, bs_span text,
+                                                 bs_span *out);
+
 /* The revocation identifier of a block: its signature, verbatim. Returns an
  * empty span for an out-of-range index. */
 BS_API BS_MUST_USE bs_span bs_token_revocation_id(const bs_token *t,
@@ -885,6 +902,33 @@ BS_API void *bs_arena_array(bs_arena *a, size_t n, size_t size, size_t align) {
     memset(p, 0, total == 0U ? 1U : total);
   }
   return p;
+}
+
+/* A scoped rewind, for scratch that is provably dead.
+ *
+ * This is not free() and it does not weaken invariant 1: nothing is ever
+ * released individually, and no object outlives the arena. What it allows is
+ * a function to give back memory it allocated and finished with, before
+ * returning -- a stack discipline, not a heap one.
+ *
+ * The rule for using it is narrow, and there is exactly one caller: nothing
+ * allocated after the mark may still be reachable when the rewind happens.
+ * The expression printer qualifies because its node array and traversal stack
+ * are dead the moment the rendering is written, and nothing it publishes
+ * points into them.
+ *
+ * Without this, a block with many expressions accumulates scratch it will
+ * never touch again, and a caller sizing an arena from one expression finds
+ * it too small for ten. */
+static size_t bs_arena_mark(const bs_arena *a) {
+  return (a == NULL) ? 0U : a->off;
+}
+
+static void bs_arena_rewind(bs_arena *a, size_t mark) {
+  if (a == NULL || mark > a->off) {
+    return;
+  }
+  a->off = mark;
 }
 
 BS_API void bs_arena_reset(bs_arena *a) {
@@ -2061,6 +2105,181 @@ static int bs_pb_next(bs_cursor *c, bs_pb_field *f) {
 }
 
 /* ===========================================================================
+ * 55_base64.inc
+ * ======================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * base64url
+ *
+ * How a token travels. The specification says a Biscuit is serialized to a
+ * URL-safe base64 string, optionally prefixed with `biscuit:` when the
+ * context does not already say what it is.
+ *
+ * The decoder here is strict, and that is a deliberate choice with a cost.
+ * Padding must be canonical, the bits a final partial group leaves over must
+ * be zero, and whitespace is not skipped. A lenient decoder would accept
+ * several distinct strings for the same token, which turns "have I seen this
+ * token before?" into a question with more than one answer -- and any cache,
+ * rate limiter or deny-list keyed on the string form would be wrong in a way
+ * nobody notices until it matters.
+ *
+ * The cost is that a token some other tool encoded sloppily is rejected here.
+ * That is the trade this library makes everywhere else too.
+ * ------------------------------------------------------------------------ */
+
+#define BS_TOKEN_PREFIX "biscuit:"
+
+/* Reverse alphabet: value for a valid character, 0xFF for everything else.
+ * A table rather than a chain of range comparisons, so decoding one character
+ * takes the same work regardless of which character it is -- token bytes are
+ * public, but a uniform table is also simply smaller and easier to check. */
+static const uint8_t BS_B64URL[256] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 62U,  0xFF, 0xFF,
+    52U,  53U,  54U,  55U,  56U,  57U,  58U,  59U,  60U,  61U,  0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0U,   1U,   2U,   3U,   4U,   5U,   6U,
+    7U,   8U,   9U,   10U,  11U,  12U,  13U,  14U,  15U,  16U,  17U,  18U,
+    19U,  20U,  21U,  22U,  23U,  24U,  25U,  0xFF, 0xFF, 0xFF, 0xFF, 63U,
+    0xFF, 26U,  27U,  28U,  29U,  30U,  31U,  32U,  33U,  34U,  35U,  36U,
+    37U,  38U,  39U,  40U,  41U,  42U,  43U,  44U,  45U,  46U,  47U,  48U,
+    49U,  50U,  51U,  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF,
+};
+
+/* Length of the optional `biscuit:` prefix, or zero.
+ *
+ * Returns an offset rather than a re-based span deliberately. Slicing would
+ * hand back a pointer into the middle of the caller's buffer, and every index
+ * afterwards would be relative to a base the reader has to track separately.
+ * One origin, one set of indices. */
+static size_t bs_prefix_len(bs_span text) {
+  bs_span head;
+  bs_span want = bs_span_make("" BS_TOKEN_PREFIX, sizeof BS_TOKEN_PREFIX - 1U);
+
+  if (!bs_span_slice(text, 0U, want.n, &head) || !bs_span_eq(head, want)) {
+    return 0U;
+  }
+  return want.n;
+}
+
+BS_API bs_status bs_base64url_decode(bs_arena *a, bs_span text, bs_span *out) {
+  size_t start;
+  size_t stop; /* one past the last character of the encoded body */
+  size_t len;
+  size_t groups;
+  size_t tail;
+  size_t capacity;
+  uint8_t *buf;
+  size_t written = 0;
+
+  if (a == NULL || out == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+
+  /* Everything below indexes `text` directly, between `start` and `stop`.
+   * There is one buffer and one origin throughout. */
+  start = bs_prefix_len(text);
+  stop = text.n;
+
+  /* Padding, which may only be the last one or two characters. */
+  tail = 0;
+  while (tail < 2U && stop > start) {
+    uint8_t c = 0;
+    if (!bs_span_at(text, stop - 1U, &c) || c != (uint8_t)'=') {
+      break;
+    }
+    stop--;
+    tail++;
+  }
+  BS_ASSERT(stop >= start);
+  len = stop - start;
+
+  /* With padding present the encoding is a whole number of four-character
+   * groups; without it, a final group of two or three characters is allowed.
+   * A final group of one is not: it carries no complete byte. */
+  if (tail != 0U && ((len + tail) % 4U) != 0U) {
+    return BS_ERR_MALFORMED;
+  }
+  if ((len % 4U) == 1U) {
+    return BS_ERR_MALFORMED;
+  }
+  if (tail == 1U && (len % 4U) != 3U) {
+    return BS_ERR_MALFORMED;
+  }
+  if (tail == 2U && (len % 4U) != 2U) {
+    return BS_ERR_MALFORMED;
+  }
+
+  groups = len / 4U;
+  capacity = groups * 3U;
+  switch (len % 4U) {
+  case 2U:
+    capacity += 1U;
+    break;
+  case 3U:
+    capacity += 2U;
+    break;
+  default:
+    break;
+  }
+
+  buf = (uint8_t *)bs_arena_alloc(a, (capacity == 0U) ? 1U : capacity, 1U);
+  if (buf == NULL) {
+    return BS_ERR_NOMEM;
+  }
+
+  {
+    uint32_t acc = 0;
+    unsigned int bits = 0;
+    size_t i;
+    for (i = start; i < stop; i++) {
+      uint8_t c = 0;
+      uint8_t v;
+      if (!bs_span_at(text, i, &c)) {
+        return BS_ERR_MALFORMED;
+      }
+      v = BS_B64URL[c];
+      if (v == 0xFFU) {
+        /* Whitespace included: a decoder that skips it accepts several
+         * strings for one token. */
+        return BS_ERR_MALFORMED;
+      }
+      acc = (acc << 6U) | v;
+      bits += 6U;
+      if (bits >= 8U) {
+        bits -= 8U;
+        if (written >= capacity) {
+          return BS_ERR_MALFORMED;
+        }
+        buf[written++] = (uint8_t)((acc >> bits) & 0xFFU);
+      }
+    }
+    /* The bits a partial final group leaves over must be zero. Otherwise two
+     * different strings decode to the same bytes, and the token has more than
+     * one canonical form. */
+    if (bits != 0U && (acc & ((1U << bits) - 1U)) != 0U) {
+      return BS_ERR_MALFORMED;
+    }
+  }
+
+  BS_ASSERT(written == capacity);
+  *out = bs_span_make(buf, written);
+  return BS_OK;
+}
+
+/* ===========================================================================
  * 60_token.inc
  * ======================================================================== */
 
@@ -2466,6 +2685,27 @@ BS_API bs_span bs_token_revocation_id(const bs_token *t, size_t index) {
   }
   /* The revocation identifier for a block is its signature, verbatim. */
   return t->blocks[index].signature;
+}
+
+/* Decode a token from its text form and parse it.
+ *
+ * This is how a Biscuit actually arrives: URL-safe base64, sometimes with a
+ * `biscuit:` prefix when the surrounding context does not already say what it
+ * is. The decoded bytes are allocated from the arena, so the returned token's
+ * spans point into arena memory rather than into the caller's string -- which
+ * means the arena, not the text, is what must outlive the token. */
+BS_API bs_status bs_token_parse_text(bs_arena *a, bs_span text, bs_token *out) {
+  bs_span raw;
+  bs_status st;
+
+  if (a == NULL || out == NULL) {
+    return BS_ERR_ARGUMENT;
+  }
+  st = bs_base64url_decode(a, text, &raw);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_token_parse(a, raw, out);
 }
 
 /* ===========================================================================
@@ -3952,16 +4192,28 @@ BS_API bs_status bs_expr_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
   uint32_t *stack = NULL;
   uint32_t root = 0;
   size_t count = 0;
+  size_t mark;
   bs_status st;
 
   if (w == NULL || a == NULL || tab == NULL) {
     return BS_ERR_ARGUMENT;
   }
+
+  /* The node array and the traversal stack are scratch: they are dead the
+   * moment the rendering is written, and nothing published outward points
+   * into them -- bs_enode.payload spans point at the token's own bytes, never
+   * at the arena. So the arena is rewound on the way out.
+   *
+   * The bound is generous by design (half the expression's length, where a
+   * typical expression needs a tenth of that), which is fine for one
+   * expression and would not be for the twenty in a block. */
+  mark = bs_arena_mark(a);
   st = bs_expr_build(a, expr, &nodes, &stack, &root, &count);
-  if (st != BS_OK) {
-    return st;
+  if (st == BS_OK) {
+    st = bs_expr_emit(w, tab, nodes, count, root, stack, (expr.n / 2U) + 1U);
   }
-  return bs_expr_emit(w, tab, nodes, count, root, stack, (expr.n / 2U) + 1U);
+  bs_arena_rewind(a, mark);
+  return st;
 }
 
 /* ===========================================================================

@@ -8,6 +8,7 @@
  */
 
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 
 #define BS_ASSERT(cond) assert(cond)
@@ -439,8 +440,189 @@ static void test_term_output_can_overflow(void) {
   CHECK(bs_writer_len(&w) <= sizeof tiny);
 }
 
+/* --------------------------------------------------------------------------
+ * Expressions
+ * ----------------------------------------------------------------------- */
+
+static uint8_t expr_arena_buf[16384];
+static bs_arena EXPR_A;
+static bs_tables EXPR_TAB;
+
+static void put_op_value_int(buf *w, int64_t v) {
+  buf term;
+  buf op;
+  term.n = 0;
+  put_tag(&term, BS_F_TERM_INTEGER, BS_PB_VARINT);
+  put_varint(&term, (uint64_t)v);
+  op.n = 0;
+  put_bytes(&op, BS_F_OP_VALUE, term.b, term.n);
+  put_bytes(w, BS_F_EXPR_OPS, op.b, op.n);
+}
+
+static void put_op_kind(buf *w, uint32_t branch, uint32_t kind, uint64_t ffi,
+                        int has_ffi) {
+  buf inner;
+  buf op;
+  inner.n = 0;
+  put_tag(&inner, BS_F_OPKIND, BS_PB_VARINT);
+  put_varint(&inner, kind);
+  if (has_ffi) {
+    put_tag(&inner, BS_F_OPFFI, BS_PB_VARINT);
+    put_varint(&inner, ffi);
+  }
+  op.n = 0;
+  put_bytes(&op, branch, inner.b, inner.n);
+  put_bytes(w, BS_F_EXPR_OPS, op.b, op.n);
+}
+
+static int expr_renders(const buf *e, const char *expect) {
+  reset();
+  if (bs_arena_init(&EXPR_A, expr_arena_buf, sizeof expr_arena_buf) != BS_OK) {
+    return 0;
+  }
+  if (bs_expr_print(&W, &EXPR_A, &EXPR_TAB, span_of(e)) != BS_OK) {
+    return 0;
+  }
+  return rendered(expect);
+}
+
+/* Every binary opcode the specification defines, with its rendered form.
+ *
+ * The conformance samples exercise about half of these; the eager `And` and
+ * `Or` appear in none of the 38, and printing them the same way as their
+ * short-circuiting counterparts was a real divergence the suite could not
+ * catch. Pinning all thirty here is what closes that gap. */
+static void test_every_binary_opcode(void) {
+  static const struct {
+    uint32_t kind;
+    const char *expect;
+  } CASES[] = {
+      {0U, "1 < 2"},
+      {1U, "1 > 2"},
+      {2U, "1 <= 2"},
+      {3U, "1 >= 2"},
+      {4U, "1 === 2"},
+      {5U, "1.contains(2)"},
+      {6U, "1.starts_with(2)"},
+      {7U, "1.ends_with(2)"},
+      {8U, "1.matches(2)"},
+      {9U, "1 + 2"},
+      {10U, "1 - 2"},
+      {11U, "1 * 2"},
+      {12U, "1 / 2"},
+      {13U, "1 &&! 2"}, /* eager */
+      {14U, "1 ||! 2"}, /* eager */
+      {15U, "1.intersection(2)"},
+      {16U, "1.union(2)"},
+      {17U, "1 & 2"},
+      {18U, "1 | 2"},
+      {19U, "1 ^ 2"},
+      {20U, "1 !== 2"},
+      {21U, "1 == 2"},
+      {22U, "1 != 2"},
+      {23U, "1 && 2"}, /* short-circuiting */
+      {24U, "1 || 2"}, /* short-circuiting */
+      {25U, "1.all(2)"},
+      {26U, "1.any(2)"},
+      {27U, "1.get(2)"},
+      {29U, "1.try_or(2)"},
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+    buf e;
+    e.n = 0;
+    put_op_value_int(&e, 1);
+    put_op_value_int(&e, 2);
+    put_op_kind(&e, BS_F_OP_BINARY, CASES[i].kind, 0U, 0);
+    if (!expr_renders(&e, CASES[i].expect)) {
+      (void)printf("# binary opcode %u rendered as %.*s, wanted %s\n",
+                   (unsigned int)CASES[i].kind, (int)bs_writer_len(&W),
+                   render_buf, CASES[i].expect);
+    }
+    CHECK(expr_renders(&e, CASES[i].expect));
+  }
+
+  /* The external call carries its name in the symbol table. */
+  {
+    buf e;
+    e.n = 0;
+    put_op_value_int(&e, 1);
+    put_op_value_int(&e, 2);
+    put_op_kind(&e, BS_F_OP_BINARY, 28U, 1024U, 1);
+    CHECK(expr_renders(&e, "1.extern::alpha(2)"));
+  }
+
+  /* An opcode nobody has defined is malformed, not blank. */
+  {
+    buf e;
+    e.n = 0;
+    put_op_value_int(&e, 1);
+    put_op_value_int(&e, 2);
+    put_op_kind(&e, BS_F_OP_BINARY, 99U, 0U, 0);
+    CHECK(!expr_renders(&e, ""));
+  }
+}
+
+static void test_every_unary_opcode(void) {
+  static const struct {
+    uint32_t kind;
+    const char *expect;
+  } CASES[] = {
+      {0U, "!1"},
+      {1U, "(1)"},
+      {2U, "1.length()"},
+      {3U, "1.type()"},
+  };
+  size_t i;
+
+  for (i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+    buf e;
+    e.n = 0;
+    put_op_value_int(&e, 1);
+    put_op_kind(&e, BS_F_OP_UNARY, CASES[i].kind, 0U, 0);
+    CHECK(expr_renders(&e, CASES[i].expect));
+  }
+
+  {
+    buf e;
+    e.n = 0;
+    put_op_value_int(&e, 1);
+    put_op_kind(&e, BS_F_OP_UNARY, 4U, 1024U, 1);
+    CHECK(expr_renders(&e, "1.extern::alpha()"));
+  }
+}
+
+static void test_expression_stack_discipline(void) {
+  buf e;
+
+  /* A binary operator with only one operand underflows the stack. */
+  e.n = 0;
+  put_op_value_int(&e, 1);
+  put_op_kind(&e, BS_F_OP_BINARY, 0U, 0U, 0);
+  CHECK(!expr_renders(&e, ""));
+
+  /* Two values and no operator leaves two results where one is required. */
+  e.n = 0;
+  put_op_value_int(&e, 1);
+  put_op_value_int(&e, 2);
+  CHECK(!expr_renders(&e, ""));
+
+  /* An empty expression produces nothing to print. */
+  e.n = 0;
+  CHECK(!expr_renders(&e, ""));
+
+  /* A single value is a complete expression. */
+  e.n = 0;
+  put_op_value_int(&e, 42);
+  CHECK(expr_renders(&e, "42"));
+}
+
 int main(void) {
   symbols_for_tests();
+  EXPR_TAB.symbols = SYM;
+  EXPR_TAB.public_keys = NULL;
+  EXPR_TAB.public_key_count = 0U;
   test_writer_overflow_is_sticky();
   test_writer_integers();
   test_writer_dates();
@@ -452,5 +634,8 @@ int main(void) {
   test_term_maps();
   test_term_nesting_is_bounded();
   test_term_output_can_overflow();
+  test_every_binary_opcode();
+  test_every_unary_opcode();
+  test_expression_stack_discipline();
   return bs_test_finish();
 }

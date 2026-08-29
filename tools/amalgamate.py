@@ -31,6 +31,7 @@ PARTS = [
     "46_verify.inc",
     "47_chain.inc",
     "50_pb.inc",
+    "55_base64.inc",
     "60_token.inc",
     "70_writer.inc",
     "75_symbols.inc",

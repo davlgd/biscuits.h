@@ -314,6 +314,33 @@ BS_API void *bs_arena_array(bs_arena *a, size_t n, size_t size, size_t align) {
   return p;
 }
 
+/* A scoped rewind, for scratch that is provably dead.
+ *
+ * This is not free() and it does not weaken invariant 1: nothing is ever
+ * released individually, and no object outlives the arena. What it allows is
+ * a function to give back memory it allocated and finished with, before
+ * returning -- a stack discipline, not a heap one.
+ *
+ * The rule for using it is narrow, and there is exactly one caller: nothing
+ * allocated after the mark may still be reachable when the rewind happens.
+ * The expression printer qualifies because its node array and traversal stack
+ * are dead the moment the rendering is written, and nothing it publishes
+ * points into them.
+ *
+ * Without this, a block with many expressions accumulates scratch it will
+ * never touch again, and a caller sizing an arena from one expression finds
+ * it too small for ten. */
+static size_t bs_arena_mark(const bs_arena *a) {
+  return (a == NULL) ? 0U : a->off;
+}
+
+static void bs_arena_rewind(bs_arena *a, size_t mark) {
+  if (a == NULL || mark > a->off) {
+    return;
+  }
+  a->off = mark;
+}
+
 BS_API void bs_arena_reset(bs_arena *a) {
   if (a == NULL) {
     return;
