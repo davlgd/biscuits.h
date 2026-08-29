@@ -977,6 +977,7 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
       if (st != BS_OK) {
         return st;
       }
+      w->rules[w->rule_count].is_query = 1;
       w->rule_count++;
     }
 

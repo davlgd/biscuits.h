@@ -129,7 +129,7 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Symbol interning across blocks | done — third-party blocks unified into one space |
 | Wire to memory loader | done — facts, rules, checks, expressions, closures |
 | Scope resolution | done — trust sets computed at load, not at evaluation |
-| Datalog engine | in progress |
+| Datalog engine | done — fixpoint, origin subsets, recursion-free joins |
 | Expression evaluator | done — every operator the samples exercise, closures included |
 | Regular expressions | done — Thompson simulation, linear on any input |
 | Datalog text parser | not started |
@@ -148,8 +148,8 @@ tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         7943 lines
-object -Os    58496 bytes
+header         8273 lines
+object -Os    60264 bytes
 ```
 <!-- metrics:end -->
 

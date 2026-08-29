@@ -488,6 +488,10 @@ typedef struct bs_op {
 
 typedef struct bs_rule {
   bs_predicate head;
+  /* A check's queries live in this pool too, and must not take part in the
+   * fixpoint: a query is asked once, when the check is evaluated, and does
+   * not add its head to the world. */
+  uint8_t is_query;
   uint32_t body_at; /* into the predicate pool */
   uint32_t body_count;
   uint32_t expr_at; /* into the expression pool */
@@ -680,3 +684,15 @@ BS_API BS_MUST_USE bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms,
                                               bs_arena *a, bs_expr expr,
                                               const bs_binding *bindings,
                                               size_t binding_count, int *out);
+
+/* ---------------------------------------------------------------------------
+ * Evaluation
+ * ------------------------------------------------------------------------ */
+
+/* Run every rule to a fixpoint, appending what they derive.
+ *
+ * Bounded by iterations rather than by time, as the specification's own run
+ * limits are: a token cannot buy itself an unbounded evaluation, and reaching
+ * the bound is BS_ERR_LIMIT rather than a hang. Pass 0 for the default. */
+BS_API BS_MUST_USE bs_status bs_world_run(bs_world *w, bs_symtab *syms,
+                                          bs_arena *a, size_t max_iterations);
