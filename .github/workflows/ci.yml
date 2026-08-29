@@ -1,0 +1,94 @@
+name: ci
+
+# Every claim this project makes is a job in this file. If a claim is not
+# checked here, it is not a claim -- it is an opinion.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The shipped header is generated. If it drifts from src/, everything below
+  # is testing something nobody will ever download.
+  amalgamation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make check-amalgamation
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+        exclude:
+          # macOS "gcc" is a clang shim; running it adds no signal.
+          - os: macos-latest
+            cc: gcc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make unit
+        env:
+          CC: ${{ matrix.cc }}
+
+  sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: AddressSanitizer + UndefinedBehaviorSanitizer
+        run: make asan
+        env:
+          CC: clang
+
+  # MemorySanitizer is Linux-only: there is no libclang_rt.msan for
+  # macOS/arm64. Uninitialised-read coverage lives here or nowhere.
+  memory-sanitizer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make msan
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install analysers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy clang-format cppcheck
+      - run: make format-check
+      - run: make tidy
+      - run: make cppcheck
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tools
+      - run: make analyze
+
+  # Not a gate -- a ratchet. The number is the headline claim, so it is
+  # measured on every commit rather than quoted from memory.
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make size | tee -a "$GITHUB_STEP_SUMMARY"

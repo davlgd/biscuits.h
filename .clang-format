@@ -1,0 +1,17 @@
+# The shipped header is meant to be read, not just compiled. 80 columns and
+# two-space indents keep it legible in a side-by-side diff and in the terminal,
+# which is where most people will first meet this code.
+Language: Cpp
+BasedOnStyle: LLVM
+ColumnLimit: 80
+IndentWidth: 2
+UseTab: Never
+PointerAlignment: Right
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+# The whole library body lives inside one include guard, so AfterHash would
+# indent the entire file by two columns. Flush-left is the single-header norm.
+IndentPPDirectives: None
+SortIncludes: false

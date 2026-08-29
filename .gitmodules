@@ -1,0 +1,3 @@
+[submodule "vendor/biscuit-spec"]
+	path = vendor/biscuit-spec
+	url = https://github.com/biscuit-auth/biscuit.git

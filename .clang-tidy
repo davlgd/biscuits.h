@@ -1,0 +1,55 @@
+# Everything enabled here is an error, not a warning. A lint that can be
+# ignored is a lint that will be ignored, and this project's entire argument
+# rests on the checks actually holding.
+#
+# The disabled checks below are disabled for a stated reason. "Too noisy" is
+# not a reason; if one comes back, it comes back with a justification.
+
+Checks: >
+  -*,
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-avoid-nested-conditional-operator,
+  -misc-include-cleaner
+
+# Rationale for each exclusion:
+#
+#   bugprone-easily-swappable-parameters
+#     (span, offset, length) and (arena, size, align) are the natural shapes
+#     for this domain. Renaming them to satisfy the check would make the API
+#     worse, and the tests already cover argument transposition.
+#
+#   readability-identifier-length
+#     Short names in short scopes are clearer than long ones. `i` in a loop
+#     and `a` for an arena parameter are idiomatic C, not obscurity.
+#
+#   readability-magic-numbers
+#     Wire formats are made of magic numbers. Protobuf tags, base64 alphabet
+#     sizes and Ed25519 field widths are constants defined by a specification
+#     we do not control; naming each one adds indirection, not meaning.
+#
+#   readability-function-cognitive-complexity
+#     A protobuf field dispatcher is a wide switch. Splitting it to satisfy a
+#     metric would scatter the wire format across several functions and make
+#     it harder to check against the schema.
+#
+#   readability-avoid-nested-conditional-operator
+#     Used once, in bounds normalisation, where the nesting is the clearest
+#     form. Revisit if it spreads.
+#
+#   misc-include-cleaner
+#     The shipped artefact is one amalgamated header; per-fragment include
+#     hygiene is meaningless here and the prologue owns every include.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*'
+FormatStyle: file
