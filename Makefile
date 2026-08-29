@@ -95,7 +95,7 @@ UNIT_BINS   := $(patsubst tests/unit/%.c,$(BUILD)/unit_%,$(UNIT_SRCS))
 SHIM_SRC    := tests/conformance/shim.c
 # Everything written by hand, for the formatters and linters. The generated
 # header is covered through the fragments it is built from.
-ALL_C       := $(UNIT_SRCS) $(SHIM_SRC)
+ALL_C       := $(UNIT_SRCS) $(SHIM_SRC) tests/build/no_bundled_crypto.c
 
 .PHONY: all
 all: $(HEADER) test invariants
@@ -122,7 +122,7 @@ check-amalgamation:
 # Tests
 # ---------------------------------------------------------------------------
 .PHONY: test
-test: unit conformance portable
+test: unit conformance portable unbundled
 
 .PHONY: unit
 unit: $(UNIT_BINS)
@@ -179,6 +179,13 @@ else
 	@echo "  SKIP  msan: unsupported on $(UNAME_S) (Linux CI job covers it)"
 endif
 
+# The bring-your-own-crypto seam, compiled so the claim cannot decay.
+.PHONY: unbundled
+unbundled: $(HEADER) | $(BUILD)
+	@$(CC) $(CFLAGS_DEBUG) tests/build/no_bundled_crypto.c \
+	    -o $(BUILD)/no_bundled_crypto
+	@./$(BUILD)/no_bundled_crypto
+
 # The portable arithmetic path is dead code on every compiler we test with,
 # which is exactly how it rots. This builds the whole suite against it.
 .PHONY: portable
@@ -200,12 +207,18 @@ tidy: $(HEADER)
 cppcheck: $(HEADER)
 # --language=c is required: cppcheck does not recognise the .inc extension and
 # would otherwise analyse zero files from src/ while still exiting 0.
+#
+# tests/build is excluded: it links the library against a stub verifier that
+# always fails, so every status check downstream of it is constant and
+# cppcheck reports the whole call chain as dead. The file exists to prove the
+# seam compiles, not to be analysed.
 	@cppcheck --std=c99 --enable=all --inconclusive --error-exitcode=1 \
 	    --check-level=exhaustive --inline-suppr --language=c \
 	    --suppress=missingIncludeSystem \
 	    --suppress=unusedFunction \
 	    --suppress=unmatchedSuppression \
 	    --suppress=checkersReport \
+	    -i tests/build \
 	    $(INCLUDE) src tests
 
 .PHONY: analyze

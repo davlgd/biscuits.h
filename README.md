@@ -118,29 +118,57 @@ test cases is the wrong trade to make first. Everything else is in scope.
 | Term printer | done — recursion-free, depth-bounded |
 | Expression printer | done — opcode stream back to source, closures included |
 | Block and Datalog printer | done — **43/43** on the blocks tier |
+| Ed25519 verification | done — **47/47** on the signatures tier |
 | Base64url | not started |
-| Ed25519 verification | not started |
 | Datalog engine | not started |
 | Expression VM | not started |
 | Datalog text parser | not started |
 | Authorizer | not started |
 | ECDSA secp256r1 | deferred to 1.1 |
 
-Three of the four conformance tiers are green: every well-formed sample token
-decodes, reports byte-identical revocation identifiers, and prints back to the
-exact Datalog source the specification records — expressions, closures,
-third-party blocks and public-key interning included. What remains is
-verification and authorization.
+Four of the five conformance tiers are green. Every well-formed sample token
+decodes, reports byte-identical revocation identifiers, **verifies against the
+root key**, and prints back to the exact Datalog source the specification
+records — expressions, closures, third-party blocks and public-key interning
+included. Sealed tokens, truncated chains, reordered blocks and wrong root keys
+are all rejected. What remains is the Datalog engine and the authorizer.
 
-355 unit assertions, all sanitizer- and analyser-clean. Measured on the current
+405 unit assertions, all sanitizer- and analyser-clean. Measured on the current
 tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header         3149 lines
-object -Os    24448 bytes
+header         4113 lines
+object -Os    35664 bytes
 ```
 <!-- metrics:end -->
+
+## Cryptography
+
+Ed25519 verification is bundled, so the header works on its own. The curve and
+hash arithmetic is vendored from [TweetNaCl](https://tweetnacl.cr.yp.to/) —
+public domain, widely reviewed — reduced to the dependency closure of
+signature verification and nothing else. Every symbol is renamed and made
+static, because upstream declares file-scope identifiers called `A`, `D`, `K`,
+`M`, `u8` and `gf`, which is not something a header should put in your
+translation unit.
+
+What is *not* vendored: the streaming SHA-512 and the twenty lines that
+assemble the verification equation. Upstream's entry point wants one buffer
+holding signature followed by message and copies the message out again — two
+allocations proportional to the input, in a library whose first invariant is
+that it never allocates. The arithmetic it calls is unchanged; only the shape
+of the buffers differs. The RFC 8032 vectors, rejection cases included, are
+what makes that claim checkable.
+
+If your process already links libsodium, mbedTLS, BearSSL or a platform
+keystore, define `BISCUITS_NO_BUNDLED_CRYPTO` and supply your own verifier:
+the core drops from 35 KB to 25 KB and a reviewer has one copy of the curve
+arithmetic to trust instead of two. `make unbundled` builds that seam on every
+commit, so the option cannot quietly stop working.
+
+Verification needs no entropy. There is no CSPRNG anywhere in the library,
+which is what lets it run on a target that has no source of randomness.
 
 ## Building
 
@@ -148,6 +176,7 @@ object -Os    24448 bytes
 make             # amalgamate, build, test, conformance and invariants
 make conformance # the official spec suite, scored by tier
 make invariants  # the design invariants, checked on the compiled object
+make unbundled   # build without the bundled Ed25519, against your own
 make asan        # AddressSanitizer + UndefinedBehaviorSanitizer
 make lint        # amalgamation, format, clang-tidy, cppcheck, invariants
 make analyze     # clang static analyzer

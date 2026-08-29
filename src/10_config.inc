@@ -60,3 +60,46 @@
 #define BS_MUST_USE
 #endif
 #endif
+
+/* Bundled cryptography.
+ *
+ * By default the library carries its own Ed25519 verifier, so the header is
+ * self-contained. Define BISCUITS_NO_BUNDLED_CRYPTO to omit it and supply
+ * your own instead -- worth doing when the process already links libsodium,
+ * mbedTLS, BearSSL or a platform keystore, since a second copy of the same
+ * curve arithmetic costs space and doubles the code a reviewer must trust.
+ *
+ * In that mode you define one function:
+ *
+ *   bs_status bs_ed25519_verify_parts(bs_span pubkey, bs_span sig,
+ *                                     const bs_span *parts, size_t count);
+ *
+ * It must return BS_OK when `sig` is a valid Ed25519 signature by `pubkey`
+ * over the concatenation of `parts`, and BS_ERR_SIGNATURE otherwise. The
+ * parts are given separately rather than joined because the message includes
+ * the block data, and joining it would mean a buffer the size of the input in
+ * a library whose first invariant is that it never allocates. Every part is
+ * valid for the duration of the call. */
+#ifndef BISCUITS_NO_BUNDLED_CRYPTO
+#define BS_BUNDLED_CRYPTO 1
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Protocol constants
+ *
+ * Widths the wire format fixes, not choices this library makes. They live
+ * here rather than beside the cryptography because the container decoder
+ * needs them whether or not the bundled verifier is compiled in.
+ * ------------------------------------------------------------------------ */
+
+/* Ed25519 keys are compressed Edwards points; secp256r1 keys are compressed
+ * SEC1 points, whose leading byte must be 0x02 or 0x03. */
+#define BS_ED25519_PUBKEY_LEN 32U
+#define BS_ED25519_SIG_LEN 64U
+#define BS_ED25519_SECRET_LEN 32U
+#define BS_SECP256R1_PUBKEY_LEN 33U
+
+/* The most pieces any signature payload is built from: a version-1 block
+ * signature over a third-party block, which is markers, version, data,
+ * algorithm, next key, previous signature and external signature. */
+#define BS_MAX_SIG_PARTS 12U

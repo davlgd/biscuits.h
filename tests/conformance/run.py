@@ -28,7 +28,7 @@ SAMPLES = ROOT / "vendor" / "biscuit-spec" / "samples" / "current"
 # Tiers, in dependency order: a failure at one tier makes the later ones
 # meaningless for that case, so they are reported as blocked rather than
 # failed. Only a tier the shim declares support for is scored at all.
-TIERS = ("decode", "revocation_ids", "blocks", "authorize")
+TIERS = ("decode", "revocation_ids", "signatures", "blocks", "authorize")
 
 # Cases this implementation is documented as not supporting. They still run --
 # a skipped test hides a regression -- but a failure is reported as a TAP TODO
@@ -173,6 +173,18 @@ def compare(tier: str, expected, actual) -> tuple:
         got = [str(i).lower() for i in actual.get("revocation_ids", [])]
         if want != got:
             return False, f"expected {want}, got {got}"
+        return True, ""
+
+    if tier == "signatures":
+        # A token that never decoded has no chain to check.
+        if not expected["ok"] and expected.get("kind") in DECODE_FAILURE_KINDS:
+            return None, "the token does not decode, so there is no chain"
+        want_ok = expected["ok"] or expected.get("kind") != "signature"
+        got = actual.get("signatures")
+        got_ok = got == "ok"
+        if want_ok != got_ok:
+            return False, (f"expected the signature chain to "
+                           f"{'verify' if want_ok else 'fail'}, got {got!r}")
         return True, ""
 
     if tier == "blocks":

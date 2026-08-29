@@ -55,6 +55,14 @@ ALLOWED_LIBC = {"memcpy", "memcmp", "memset", "bzero", "bcmp"}
 TOOLCHAIN_SYMBOLS = {
     "__stack_chk_fail",
     "__stack_chk_guard",
+    # _FORTIFY_SOURCE, which Apple's SDK enables by default at -O1 and above,
+    # rewrites memcpy and friends into bounds-checking wrappers. These are the
+    # allowed functions with a length check bolted on, not new dependencies --
+    # but they are listed rather than pattern-matched, so a genuinely new
+    # __-prefixed symbol still shows up.
+    "__memcpy_chk",
+    "__memmove_chk",
+    "__memset_chk",
 }
 
 # Invariant 4: the functions permitted to do pointer arithmetic or index

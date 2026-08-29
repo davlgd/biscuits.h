@@ -321,3 +321,30 @@ BS_API BS_MUST_USE bs_status bs_check_print(bs_writer *w, bs_arena *a,
 BS_API BS_MUST_USE bs_status bs_block_print(bs_writer *w, bs_arena *a,
                                             const bs_tables *tab,
                                             bs_span block);
+
+/* ---------------------------------------------------------------------------
+ * Verification
+ *
+ * With BISCUITS_NO_BUNDLED_CRYPTO you supply the two primitives below; see
+ * the note in the configuration section for why they take the message in
+ * pieces rather than as one buffer.
+ * ------------------------------------------------------------------------ */
+
+#ifndef BS_BUNDLED_CRYPTO
+bs_status bs_ed25519_verify_parts(bs_span pubkey, bs_span sig,
+                                  const bs_span *parts, size_t count);
+bs_status bs_ed25519_public_from_secret(bs_span seed, uint8_t out[32]);
+#endif
+
+/* Check a token's signature chain against a root public key.
+ *
+ * BS_OK means every block signature verifies, every third-party signature
+ * verifies, and the proof at the end of the token matches -- so the token is
+ * authentic and has not been truncated. Every other status means it is not
+ * authentic; none of them means "probably fine".
+ *
+ * This says nothing about whether the token authorizes anything: that is a
+ * separate question with a separate answer, and keeping them apart is what
+ * stops an authentic token from being mistaken for an authorized one. */
+BS_API BS_MUST_USE bs_status bs_token_verify(const bs_token *t,
+                                             bs_span root_key);

@@ -34,13 +34,6 @@
 #define BS_F_PROOF_NEXT_SECRET 1U
 #define BS_F_PROOF_FINAL_SIGNATURE 2U
 
-/* Key widths. Ed25519 is a compressed Edwards point; secp256r1 is a
- * compressed SEC1 point whose leading byte must be 0x02 or 0x03. */
-#define BS_ED25519_PUBKEY_LEN 32U
-#define BS_ED25519_SIG_LEN 64U
-#define BS_ED25519_SECRET_LEN 32U
-#define BS_SECP256R1_PUBKEY_LEN 33U
-
 static bs_status bs_pb_pubkey(bs_span in, bs_public_key *out) {
   bs_cursor c = bs_cursor_make(in);
   bs_pb_field f;

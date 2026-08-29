@@ -2,8 +2,9 @@
 
 ## Status: do not use this yet
 
-This library is under initial development. It does not verify tokens and it has
-never been fuzzed. Nothing here should be relied on for anything.
+This library is under initial development. It verifies signature chains but
+cannot yet authorize anything, and it has never been fuzzed. Nothing here
+should be relied on for anything.
 
 It has had one adversarial review, which found a misaligned-pointer defect in
 the arena, a specification rule the decoder did not enforce, and several claims
@@ -69,7 +70,10 @@ Claims without a number in this table are not yet claims.
 | Differential fuzzing vs `biscuit-rust` | Same input, both implementations, verdicts compared | not started |
 | Wire decoder bounded model checking | CBMC over the protobuf and base64 decoders | not started |
 | Constant-time secret handling | Valgrind/TIMECOP technique on the Linux job | not started |
-| Specification conformance | 36 of the 38 official sample tokens | decode 48/48, revocation ids 43/43; authorization not started |
+| Specification conformance | 36 of the 38 official sample tokens | decode 48/48, revocation ids 43/43, signatures 47/47, blocks 43/43; authorization not started |
+| Ed25519 against RFC 8032 vectors | `make unit`, positive and rejection cases | passing |
+| Ed25519 against Project Wycheproof | malleability and low-order points | not started |
+| Builds without bundled crypto | `make unbundled` | passing |
 
 ## Scope
 
@@ -84,12 +88,23 @@ Out of scope for 1.0, and deliberately so:
 
 ## Cryptography
 
-The Ed25519 implementation will be vendored from a reviewed, compact,
-public-domain source rather than written here, and the provenance will be
-stated in this file with the exact upstream revision. Writing new curve
+Ed25519 verification is vendored, not written here. Writing new curve
 arithmetic for a project whose selling point is auditability would be a
 strange way to spend the trust.
 
-Correctness is checked against the RFC 8032 vectors and against
+| | |
+|---|---|
+| Upstream | https://tweetnacl.cr.yp.to/20140427/tweetnacl.c |
+| SHA-256 | `02e65bc3013ff2168983365e55906bc783c4c7e0a60d8100f17bb303a17175c4` |
+| License | public domain |
+| Extracted | the dependency closure of signature verification: no signing, no key generation, no X25519, no secretbox, no Salsa20, no Poly1305 |
+| Modified | every symbol renamed and made static; the one-shot hash replaced by a streaming one and the verification equation reassembled, to avoid buffers the size of the message |
+
+Correctness is checked against the RFC 8032 vectors, including rejection
+cases — a verifier that accepts everything passes every positive test.
 [Project Wycheproof](https://github.com/C2SP/wycheproof), which covers the
-malleability and low-order-point edge cases that nominal vectors miss.
+malleability and low-order-point edge cases that nominal vectors miss, is not
+yet wired in and is tracked in the table above as not started.
+
+Define `BISCUITS_NO_BUNDLED_CRYPTO` to omit all of it and supply your own
+verifier. `make unbundled` builds that path on every commit.

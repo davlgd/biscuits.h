@@ -20,10 +20,7 @@
 /* Grows as the library does. Each name here is a promise the runner will
  * hold us to; adding one before it works turns a skip into a failure. */
 static const char *const CAPABILITIES[] = {
-    "decode",
-    "revocation_ids",
-    "blocks",
-    NULL,
+    "decode", "revocation_ids", "signatures", "blocks", NULL,
 };
 
 /* The arena for one token. Sized generously for a test tool; the point of the
@@ -108,6 +105,27 @@ static void emit_json_string(const char *p, size_t n) {
 }
 
 static char block_buf[64 * 1024];
+static uint8_t g_root_key[32];
+static size_t g_root_key_len;
+
+/* Hex to bytes, for the root key the runner passes on the command line. */
+static size_t unhex(const char *h, uint8_t *out, size_t cap) {
+  size_t n = 0;
+  while (h[0] != '\0' && h[1] != '\0' && n < cap) {
+    unsigned int v = 0;
+    size_t k;
+    for (k = 0; k < 2U; k++) {
+      unsigned int c = (unsigned int)(unsigned char)h[k];
+      unsigned int d = (c >= (unsigned int)'0' && c <= (unsigned int)'9')
+                           ? c - (unsigned int)'0'
+                           : (c | 0x20U) - (unsigned int)'a' + 10U;
+      v = (v << 4U) | d;
+    }
+    out[n++] = (uint8_t)v;
+    h += 2;
+  }
+  return n;
+}
 
 static void emit_token(const bs_token *t, bs_arena *arena) {
   bs_tables tab;
@@ -120,6 +138,15 @@ static void emit_token(const bs_token *t, bs_arena *arena) {
     (void)putchar('"');
   }
   (void)printf("]");
+
+  {
+    bs_status st = bs_token_verify(t, bs_span_make(g_root_key, g_root_key_len));
+    if (st == BS_OK) {
+      (void)printf(",\"signatures\":\"ok\"");
+    } else {
+      (void)printf(",\"signatures\":{\"error\":\"%s\"}", bs_strstatus(st));
+    }
+  }
 
   if (bs_tables_build(arena, t, &tab) == BS_OK) {
     (void)printf(",\"blocks\":[");
@@ -167,7 +194,7 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
       token_path = argv[++i];
     } else if (strcmp(argv[i], "--root-key") == 0 && i + 1 < argc) {
-      i++; /* consumed once signature verification exists */
+      g_root_key_len = unhex(argv[++i], g_root_key, sizeof g_root_key);
     } else if (strcmp(argv[i], "--authorizer-stdin") == 0) {
       /* Drain stdin so the runner never blocks writing to a full pipe. */
       int ch;
