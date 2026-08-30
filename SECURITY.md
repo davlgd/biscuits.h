@@ -30,10 +30,12 @@ Expect an acknowledgement within a week.
 ## What has gone wrong so far
 
 Recording this because a security file that only lists what passes is a
-marketing document. Nine of the entries below were found after the code passed
-every gate in CI, most of them by adversarial review rather than by a test --
-which is the useful lesson: a green suite means the tests pass, not that the
-code is right.
+marketing document. Every entry below was found after the code passed every
+gate in CI, most by adversarial review rather than by a test — and three of
+them are defects in the fixes for the entries above them, found by reviewing
+the fixes as adversarially as the original code. A green suite means the tests
+pass, not that the code is right; and a fix written under the satisfaction of
+having found something is exactly when the next one gets in.
 
 **Signature malleability.** An adversarial review found that the vendored
 NaCl verifier accepts a non-canonical scalar: L*B is the identity, so S and
@@ -92,6 +94,25 @@ containing exactly what the block had asked to exclude. The printer already
 knew the field existed and refused to render it, which made the gap visible to
 anyone who compared the two; nothing compared them. Now honoured on all three
 paths: loader, printer and text parser.
+
+**A work budget that covered one loop of four.** The fix immediately above
+charged a step for each candidate the Datalog join examined, and nothing else.
+A closure body re-runs its opcodes once per element, so six `.all()` calls
+nested over thirty-element arrays — under six hundred bytes of source — ran
+for seven and a half seconds with the step counter never moving. Term
+comparison and the duplicate-fact scan were equally free. Found by an
+adversarial review of the fix itself, one commit later, and measured rather
+than argued. All four loops now charge. The lesson is worth more than the bug:
+a budget that covers the cheapest of several loops bounds nothing, and the
+document describing it read as though it bounded everything.
+
+**Two truncation fixes that missed their own common case.** The same commit
+made every public printer report a short write — except that `bs_term_print`
+returns on a fast path for scalars, before the check, and `bs_scope_print`
+only checked on its public-key branch. So a string, an integer or a date still
+came back `BS_OK` with a prefix of itself, which for an integer means a
+smaller number that reads as valid. The tests written alongside the fix
+covered `bs_fact_print` and `bs_predicate_print` and neither of these.
 
 **An unbounded join behind a bounded-looking limit.** `max_iterations` counts
 fixpoint rounds and says nothing about the work inside one round. Matching a

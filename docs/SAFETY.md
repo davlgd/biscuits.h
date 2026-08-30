@@ -113,10 +113,26 @@ both N and F. A single appended rule could therefore buy an evaluation that
 terminates in theory and not in practice, with every configured limit
 respected.
 
-`bs_limits.max_steps` bounds that work directly: every candidate the join
-examines spends one step, and exhausting the budget is `BS_ERR_LIMIT` rather
-than a hang. It is deterministic where a time bound is not, and identical on
-every machine. The default is ten million.
+`bs_limits.max_steps` bounds that work directly, and exhausting it is
+`BS_ERR_LIMIT` rather than a hang. It is deterministic where a time bound is
+not, and identical on every machine. The default is ten million.
+
+What spends a step is the part worth stating precisely, because the first
+version of this budget charged only one of the four places that needed it:
+
+| Charged | Why it scales with the token |
+|---|---|
+| Each candidate fact the Datalog join examines | F^N for a body of N predicates over F facts |
+| Each opcode the expression machine dispatches | a closure body re-runs its opcodes per element, so nesting `.all()` d deep over width-w containers is w^d |
+| Each step of a term comparison | comparing two containers is quadratic in their sizes |
+| Each fact a derived fact is compared against | the duplicate scan is O(facts) per accepted answer |
+
+Charging only the join left the closure path free, and that was not a
+theoretical gap: a source of under six hundred bytes — six nested `.all()`
+calls over thirty-element arrays — ran for seven and a half seconds with the
+step counter untouched, every configured limit respected. It now returns
+`BS_ERR_LIMIT` in fifty milliseconds. The lesson is the ordinary one about
+budgets: a bound that covers the cheapest of several loops bounds nothing.
 
 ### 4. Pointer arithmetic is confined
 

@@ -39,7 +39,7 @@ typedef struct bs_matchframe {
 /* Do two facts state the same thing? Origins are compared too: the same
  * sentence derived through different blocks is a different fact, because
  * scoping asks where it came from. */
-static int bs_fact_same(const bs_world *w, const bs_fact *a, const bs_fact *b) {
+static int bs_fact_same(bs_world *w, const bs_fact *a, const bs_fact *b) {
   uint32_t i;
   if (a->pred.name != b->pred.name || a->pred.count != b->pred.count ||
       a->origin != b->origin) {
@@ -59,7 +59,7 @@ static int bs_fact_same(const bs_world *w, const bs_fact *a, const bs_fact *b) {
  * takes the fact's value. Anything else must be equal outright. On failure
  * the caller truncates the binding list back to its mark, which is why
  * nothing needs undoing here. */
-static int bs_unify(const bs_world *w, const bs_predicate *p, const bs_fact *f,
+static int bs_unify(bs_world *w, const bs_predicate *p, const bs_fact *f,
                     bs_binding *binds, size_t *count, size_t cap) {
   uint32_t i;
 
@@ -337,11 +337,18 @@ static bs_status bs_rule_apply(bs_world *w, bs_symtab *syms, bs_arena *a,
     if (st != BS_OK) {
       return st;
     }
+    /* Every derived fact is compared against everything already known, so
+     * this scan is O(fact_count) per accepted answer -- work that scales with
+     * the token and has to be charged like any other. */
     for (i = 0; i < w->fact_count; i++) {
+      bs_spend(w, 1U);
       if (bs_fact_same(w, &w->facts[i], &candidate)) {
         seen = 1;
         break;
       }
+    }
+    if (bs_exhausted(w)) {
+      return BS_ERR_LIMIT;
     }
     if (seen) {
       /* Already known. Give back the terms the instantiation reserved, or a

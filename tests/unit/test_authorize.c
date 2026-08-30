@@ -381,6 +381,58 @@ static void test_the_join_is_bounded_by_work(void) {
   CHECK(V.kind == (uint8_t)BS_VERDICT_ALLOW);
 }
 
+/* Closures are charged too.
+ *
+ * A closure body re-runs its opcodes once per element, so `.all()` nested d
+ * deep over containers of width w executes on the order of w^d opcodes --
+ * and a token chooses both. The first version of this budget charged only
+ * the Datalog join, which left this path free: a source under six hundred
+ * bytes ran for seven seconds with the step counter untouched. */
+static void test_nested_closures_are_bounded(void) {
+  char src[2048];
+  size_t n = 0;
+  int d;
+  int i;
+  bs_limits lim = bs_limits_default();
+
+  n += (size_t)snprintf(src + n, sizeof src - n, "check if ");
+  for (d = 0; d < 6; d++) {
+    n += (size_t)snprintf(src + n, sizeof src - n, "[");
+    for (i = 0; i < 30; i++) {
+      n += (size_t)snprintf(src + n, sizeof src - n, "%s%d", i ? "," : "", i);
+    }
+    n += (size_t)snprintf(src + n, sizeof src - n, "].all($v%d -> ", d);
+  }
+  n += (size_t)snprintf(src + n, sizeof src - n, "true");
+  for (d = 0; d < 6; d++) {
+    n += (size_t)snprintf(src + n, sizeof src - n, ")");
+  }
+  n += (size_t)snprintf(src + n, sizeof src - n, ";\n");
+  CHECK(n < 700U); /* the whole attack is a few hundred bytes */
+
+  lim.max_terms = 8192U;
+  REQUIRE(bs_arena_init(&A, arena_buf, sizeof arena_buf) == BS_OK);
+  TAB.symbols.entries = NULL;
+  TAB.symbols.count = 0U;
+  TAB.public_keys = NULL;
+  TAB.public_key_count = 0U;
+  REQUIRE(bs_symtab_init(&SYMS, &A, &TAB.symbols, 64U) == BS_OK);
+  REQUIRE(bs_world_init(&W, &A, &TAB, 1U, &lim) == BS_OK);
+  REQUIRE(bs_world_parse(&W, &SYMS, &A, bs_span_make(src, n), 0U, NULL, NULL) ==
+          BS_OK);
+  REQUIRE(bs_world_parse(&W, &SYMS, &A, bs_span_make("allow if true;", 14U),
+                         (size_t)BS_MAX_BLOCKS, NULL, NULL) == BS_OK);
+  CHECK(bs_authorize(&W, &SYMS, &A, 0U, &V) == BS_ERR_LIMIT);
+  CHECK(W.steps == 0U);
+
+  /* Nesting a legitimate authorizer would write still decides normally. */
+  REQUIRE(
+      decide(NULL, "allow if [1, 2].all($p -> [3, 4].any($q -> $q > $p));") ==
+      BS_OK);
+  CHECK(V.kind == (uint8_t)BS_VERDICT_ALLOW);
+  CHECK(W.steps > 0U);
+}
+
 int main(void) {
   test_a_matching_allow_authorizes();
   test_the_first_matching_policy_decides();
@@ -398,5 +450,6 @@ int main(void) {
   test_a_failing_external_call_fails_its_expression();
   test_an_unregistered_call_is_refused();
   test_the_join_is_bounded_by_work();
+  test_nested_closures_are_bounded();
   return bs_test_finish();
 }

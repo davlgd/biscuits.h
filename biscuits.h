@@ -3700,7 +3700,10 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
   case 0:
     return BS_ERR_MALFORMED;
   case 1:
-    return BS_OK; /* a scalar: no stack needed at all */
+    /* A scalar needs no stack at all -- but it has already been written, so
+     * it still has to answer for whether the write fit. Returning BS_OK on
+     * the early path was the whole defect the late check was meant to fix. */
+    return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
   default:
     break;
   }
@@ -4063,13 +4066,14 @@ BS_API bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
     switch (type) {
     case BS_SCOPE_AUTHORITY:
       BS_PUT_LIT(w, "authority");
-      return BS_OK;
+      break;
     case BS_SCOPE_PREVIOUS:
       BS_PUT_LIT(w, "previous");
-      return BS_OK;
+      break;
     default:
       return BS_ERR_MALFORMED;
     }
+    return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
   }
 
   if (tab == NULL || key < 0 ||
@@ -5003,6 +5007,22 @@ BS_API bs_limits bs_limits_default(void) {
   l.max_iterations = 100U;
   l.max_steps = 10000000U;
   return l;
+}
+
+/* Spend units of the evaluation's work budget.
+ *
+ * Saturates at zero rather than wrapping, so a caller that forgets to check
+ * fails safe. Every loop whose length an attacker can influence charges here:
+ * the Datalog join, the expression machine's opcode dispatch, term equality,
+ * and the duplicate scan a derived fact runs against everything known. A
+ * budget that covered only one of them would bound the cheapest of the four
+ * and leave the rest to run as long as they liked. */
+static void bs_spend(bs_world *w, size_t n) {
+  w->steps = (w->steps > n) ? (w->steps - n) : 0U;
+}
+
+static int bs_exhausted(const bs_world *w) {
+  return w->steps == 0U;
 }
 
 BS_API bs_status bs_world_set_externs(bs_world *w, const bs_extern *externs,
@@ -7159,7 +7179,7 @@ typedef struct bs_eqframe {
   uint8_t mode;
 } bs_eqframe;
 
-static int bs_term_eq(const bs_world *w, bs_term a, bs_term b) {
+static int bs_term_eq(bs_world *w, bs_term a, bs_term b) {
   bs_eqframe st[BS_MAX_DEPTH + 2];
   size_t d = 1;
   int last = 1;
@@ -7171,6 +7191,11 @@ static int bs_term_eq(const bs_world *w, bs_term a, bs_term b) {
 
   while (d > 0U) {
     bs_eqframe *f = &st[d - 1U];
+
+    /* Comparing two containers is quadratic in their sizes, and both come
+     * from the token. Charged per step so a single comparison cannot be an
+     * unbounded amount of work hiding behind one opcode. */
+    bs_spend(w, 1U);
 
     if (f->a.kind != f->b.kind) {
       last = 0;
@@ -7267,7 +7292,7 @@ static int bs_term_eq(const bs_world *w, bs_term a, bs_term b) {
   return last;
 }
 
-static int bs_run_contains(const bs_world *w, uint32_t at, uint32_t count,
+static int bs_run_contains(bs_world *w, uint32_t at, uint32_t count,
                            bs_term needle) {
   uint32_t i = 0;
   for (; i < count; i++) {
@@ -7833,6 +7858,20 @@ again:
     int cmp = 0;
     int64_t n = 0;
 
+    /* One step per opcode dispatched.
+     *
+     * This is what bounds closures. A closure body re-runs its opcodes once
+     * per element, so `.all()` nested d deep over containers of width w
+     * executes on the order of w^d opcodes -- and both w and d come from the
+     * token. Charging only the Datalog join, as the first version of this
+     * budget did, left that entire path free: a token under a kilobyte could
+     * spin for as long as it liked with every configured limit respected. */
+    bs_spend(e->w, 1U);
+    if (bs_exhausted(e->w)) {
+      st = BS_ERR_LIMIT;
+      goto failed;
+    }
+
     /* A closure body has finished; its value is on the stack, and the
      * operator that asked for it decides what that means. */
     if (f->pending != (uint8_t)BS_PEND_NONE) {
@@ -8318,7 +8357,7 @@ typedef struct bs_matchframe {
 /* Do two facts state the same thing? Origins are compared too: the same
  * sentence derived through different blocks is a different fact, because
  * scoping asks where it came from. */
-static int bs_fact_same(const bs_world *w, const bs_fact *a, const bs_fact *b) {
+static int bs_fact_same(bs_world *w, const bs_fact *a, const bs_fact *b) {
   uint32_t i;
   if (a->pred.name != b->pred.name || a->pred.count != b->pred.count ||
       a->origin != b->origin) {
@@ -8338,7 +8377,7 @@ static int bs_fact_same(const bs_world *w, const bs_fact *a, const bs_fact *b) {
  * takes the fact's value. Anything else must be equal outright. On failure
  * the caller truncates the binding list back to its mark, which is why
  * nothing needs undoing here. */
-static int bs_unify(const bs_world *w, const bs_predicate *p, const bs_fact *f,
+static int bs_unify(bs_world *w, const bs_predicate *p, const bs_fact *f,
                     bs_binding *binds, size_t *count, size_t cap) {
   uint32_t i;
 
@@ -8616,11 +8655,18 @@ static bs_status bs_rule_apply(bs_world *w, bs_symtab *syms, bs_arena *a,
     if (st != BS_OK) {
       return st;
     }
+    /* Every derived fact is compared against everything already known, so
+     * this scan is O(fact_count) per accepted answer -- work that scales with
+     * the token and has to be charged like any other. */
     for (i = 0; i < w->fact_count; i++) {
+      bs_spend(w, 1U);
       if (bs_fact_same(w, &w->facts[i], &candidate)) {
         seen = 1;
         break;
       }
+    }
+    if (bs_exhausted(w)) {
+      return BS_ERR_LIMIT;
     }
     if (seen) {
       /* Already known. Give back the terms the instantiation reserved, or a
@@ -10664,16 +10710,27 @@ BS_API bs_status bs_world_parse(bs_world *w, bs_symtab *syms, bs_arena *a,
    * still overrides it. The authorizer has no such clause -- it is not a
    * block -- so one there is a syntax error rather than a wider default. */
   if (BS_WORD(&p, "trusting")) {
-    if (block >= (size_t)BS_MAX_BLOCKS) {
-      return BS_ERR_MALFORMED;
-    }
-    st = bs_p_trusting(&p, &p.default_trust);
+    /* `trusting` opens the clause only when it is not a predicate name. The
+     * language has no reserved words -- `trusting(1);` is a perfectly good
+     * fact -- so what distinguishes them is the parenthesis, which is one
+     * token further than the lexer holds. */
+    int is_predicate = 0;
+    st = bs_p_starts_predicate(&p, &is_predicate);
     if (st != BS_OK) {
       return st;
     }
-    st = bs_p_expect(&p, (uint8_t)BS_P_SEMI);
-    if (st != BS_OK) {
-      return st;
+    if (!is_predicate) {
+      if (block >= (size_t)BS_MAX_BLOCKS) {
+        return BS_ERR_MALFORMED; /* the authorizer is not a block */
+      }
+      st = bs_p_trusting(&p, &p.default_trust);
+      if (st != BS_OK) {
+        return st;
+      }
+      st = bs_p_expect(&p, (uint8_t)BS_P_SEMI);
+      if (st != BS_OK) {
+        return st;
+      }
     }
   }
 

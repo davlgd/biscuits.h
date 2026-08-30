@@ -288,13 +288,14 @@ BS_API bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
     switch (type) {
     case BS_SCOPE_AUTHORITY:
       BS_PUT_LIT(w, "authority");
-      return BS_OK;
+      break;
     case BS_SCOPE_PREVIOUS:
       BS_PUT_LIT(w, "previous");
-      return BS_OK;
+      break;
     default:
       return BS_ERR_MALFORMED;
     }
+    return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
   }
 
   if (tab == NULL || key < 0 ||

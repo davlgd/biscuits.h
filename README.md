@@ -149,13 +149,13 @@ third-party blocks, public-key interning, `check all`, `reject if`, external
 calls and trust-scope annotations are all exercised by that number. Sealed tokens,
 truncated chains, reordered blocks and wrong root keys are all rejected.
 
-1011 unit assertions, all sanitizer- and analyser-clean. Measured on the current
+1125 unit assertions, all sanitizer- and analyser-clean. Measured on the current
 tree — `make metrics` regenerates this block and CI fails if it drifts:
 
 <!-- metrics:begin -->
 ```
-header        10958 lines
-object -Os    78824 bytes
+header        11015 lines
+object -Os    78736 bytes
 ```
 <!-- metrics:end -->
 

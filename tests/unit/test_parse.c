@@ -315,6 +315,18 @@ static void test_block_level_trust(void) {
 
   /* The authorizer is not a block and has no such clause. */
   CHECK(refuses("trusting authority;\ncheck if a($x);"));
+
+  /* The language has no reserved words: `trusting(1)` is a fact, wherever it
+   * appears. Matching the clause on the bare identifier would have made a
+   * block whose first statement happens to be named `trusting` a syntax
+   * error -- and block content is the token's to choose. */
+  REQUIRE(reset_world());
+  REQUIRE(bs_world_parse(&W, &SYMS, &A, bs_span_make("trusting(1);", 12U), 1U,
+                         NULL, NULL) == BS_OK);
+  CHECK(W.fact_count == 1U);
+  REQUIRE(parse("trusting(1);\nallow if trusting(1);") == BS_OK);
+  CHECK(W.fact_count == 1U);
+  CHECK(W.policy_count == 1U);
 }
 
 static void test_refusals(void) {

@@ -111,7 +111,7 @@ typedef struct bs_eqframe {
   uint8_t mode;
 } bs_eqframe;
 
-static int bs_term_eq(const bs_world *w, bs_term a, bs_term b) {
+static int bs_term_eq(bs_world *w, bs_term a, bs_term b) {
   bs_eqframe st[BS_MAX_DEPTH + 2];
   size_t d = 1;
   int last = 1;
@@ -123,6 +123,11 @@ static int bs_term_eq(const bs_world *w, bs_term a, bs_term b) {
 
   while (d > 0U) {
     bs_eqframe *f = &st[d - 1U];
+
+    /* Comparing two containers is quadratic in their sizes, and both come
+     * from the token. Charged per step so a single comparison cannot be an
+     * unbounded amount of work hiding behind one opcode. */
+    bs_spend(w, 1U);
 
     if (f->a.kind != f->b.kind) {
       last = 0;
@@ -219,7 +224,7 @@ static int bs_term_eq(const bs_world *w, bs_term a, bs_term b) {
   return last;
 }
 
-static int bs_run_contains(const bs_world *w, uint32_t at, uint32_t count,
+static int bs_run_contains(bs_world *w, uint32_t at, uint32_t count,
                            bs_term needle) {
   uint32_t i = 0;
   for (; i < count; i++) {
@@ -784,6 +789,20 @@ again:
     int flag = 0;
     int cmp = 0;
     int64_t n = 0;
+
+    /* One step per opcode dispatched.
+     *
+     * This is what bounds closures. A closure body re-runs its opcodes once
+     * per element, so `.all()` nested d deep over containers of width w
+     * executes on the order of w^d opcodes -- and both w and d come from the
+     * token. Charging only the Datalog join, as the first version of this
+     * budget did, left that entire path free: a token under a kilobyte could
+     * spin for as long as it liked with every configured limit respected. */
+    bs_spend(e->w, 1U);
+    if (bs_exhausted(e->w)) {
+      st = BS_ERR_LIMIT;
+      goto failed;
+    }
 
     /* A closure body has finished; its value is on the stack, and the
      * operator that asked for it decides what that means. */

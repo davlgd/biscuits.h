@@ -22,6 +22,22 @@ BS_API bs_limits bs_limits_default(void) {
   return l;
 }
 
+/* Spend units of the evaluation's work budget.
+ *
+ * Saturates at zero rather than wrapping, so a caller that forgets to check
+ * fails safe. Every loop whose length an attacker can influence charges here:
+ * the Datalog join, the expression machine's opcode dispatch, term equality,
+ * and the duplicate scan a derived fact runs against everything known. A
+ * budget that covered only one of them would bound the cheapest of the four
+ * and leave the rest to run as long as they liked. */
+static void bs_spend(bs_world *w, size_t n) {
+  w->steps = (w->steps > n) ? (w->steps - n) : 0U;
+}
+
+static int bs_exhausted(const bs_world *w) {
+  return w->steps == 0U;
+}
+
 BS_API bs_status bs_world_set_externs(bs_world *w, const bs_extern *externs,
                                       size_t count) {
   if (w == NULL || (externs == NULL && count > 0U)) {

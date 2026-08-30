@@ -241,7 +241,10 @@ BS_API bs_status bs_term_print(bs_writer *w, const bs_symbols *sym,
   case 0:
     return BS_ERR_MALFORMED;
   case 1:
-    return BS_OK; /* a scalar: no stack needed at all */
+    /* A scalar needs no stack at all -- but it has already been written, so
+     * it still has to answer for whether the write fit. Returning BS_OK on
+     * the early path was the whole defect the late check was meant to fix. */
+    return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
   default:
     break;
   }

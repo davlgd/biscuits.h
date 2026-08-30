@@ -281,6 +281,51 @@ static void test_truncation_is_reported(void) {
     CHECK(bs_fact_print(&w, &TAB, span_of(&fact)) == BS_OK);
     CHECK(bs_writer_len(&w) == sizeof exact);
   }
+
+  /* A scalar term returns before the container path's check, so it needs its
+   * own. This is the case the first version of the fix missed, and it is the
+   * common one: a string, an integer, a date. */
+  {
+    static const uint8_t str[] = {0x18, 0x00};       /* string, symbol 0 */
+    static const uint8_t num[] = {0x10, 0xb9, 0x60}; /* int64 12345 */
+    bs_writer w;
+    char small[8];
+    /* `"read"` with its quotes is six bytes; anything short of that is a
+     * truncation the caller has to be told about. */
+    for (i = 0; i < 6U; i++) {
+      REQUIRE(bs_writer_init(&w, small, i) == BS_OK);
+      CHECK(bs_term_print(&w, &TAB.symbols, bs_span_make(str, sizeof str)) ==
+            BS_ERR_NOMEM);
+    }
+    REQUIRE(bs_writer_init(&w, small, 6U) == BS_OK);
+    CHECK(bs_term_print(&w, &TAB.symbols, bs_span_make(str, sizeof str)) ==
+          BS_OK);
+    /* An integer truncates into something that still reads as a number, which
+     * is the version of this a caller would never notice. */
+    REQUIRE(bs_writer_init(&w, small, 2U) == BS_OK);
+    CHECK(bs_term_print(&w, &TAB.symbols, bs_span_make(num, sizeof num)) ==
+          BS_ERR_NOMEM);
+    REQUIRE(bs_writer_init(&w, small, 5U) == BS_OK);
+    CHECK(bs_term_print(&w, &TAB.symbols, bs_span_make(num, sizeof num)) ==
+          BS_OK);
+  }
+
+  /* And every branch of the scope printer, not only the public-key one. */
+  {
+    static const struct {
+      uint8_t bytes[2];
+    } SCOPES[2] = {{{0x08, 0x00}}, {{0x08, 0x01}}}; /* authority, previous */
+    bs_writer w;
+    char small[8];
+    size_t k;
+    for (k = 0; k < 2U; k++) {
+      for (i = 0; i < 4U; i++) {
+        REQUIRE(bs_writer_init(&w, small, i) == BS_OK);
+        CHECK(bs_scope_print(&w, &TAB, bs_span_make(SCOPES[k].bytes, 2U)) ==
+              BS_ERR_NOMEM);
+      }
+    }
+  }
 }
 
 /* --------------------------------------------------------------------------

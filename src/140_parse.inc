@@ -1381,16 +1381,27 @@ BS_API bs_status bs_world_parse(bs_world *w, bs_symtab *syms, bs_arena *a,
    * still overrides it. The authorizer has no such clause -- it is not a
    * block -- so one there is a syntax error rather than a wider default. */
   if (BS_WORD(&p, "trusting")) {
-    if (block >= (size_t)BS_MAX_BLOCKS) {
-      return BS_ERR_MALFORMED;
-    }
-    st = bs_p_trusting(&p, &p.default_trust);
+    /* `trusting` opens the clause only when it is not a predicate name. The
+     * language has no reserved words -- `trusting(1);` is a perfectly good
+     * fact -- so what distinguishes them is the parenthesis, which is one
+     * token further than the lexer holds. */
+    int is_predicate = 0;
+    st = bs_p_starts_predicate(&p, &is_predicate);
     if (st != BS_OK) {
       return st;
     }
-    st = bs_p_expect(&p, (uint8_t)BS_P_SEMI);
-    if (st != BS_OK) {
-      return st;
+    if (!is_predicate) {
+      if (block >= (size_t)BS_MAX_BLOCKS) {
+        return BS_ERR_MALFORMED; /* the authorizer is not a block */
+      }
+      st = bs_p_trusting(&p, &p.default_trust);
+      if (st != BS_OK) {
+        return st;
+      }
+      st = bs_p_expect(&p, (uint8_t)BS_P_SEMI);
+      if (st != BS_OK) {
+        return st;
+      }
     }
   }
 
