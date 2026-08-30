@@ -671,6 +671,24 @@ static bs_term bs_iter_at(const bs_world *w, bs_term subject, uint32_t index) {
   return out;
 }
 
+/* Reach a function the host registered.
+ *
+ * The one indirect call in the library. An unregistered name fails the
+ * expression rather than evaluating to anything: a call to a function nobody
+ * supplied has no answer, and inventing one would authorize on a guess. */
+static bs_status bs_call_extern(bs_eval *e, uint64_t name, bs_term left,
+                                const bs_term *right, bs_term *out) {
+  size_t i;
+
+  for (i = 0; i < e->w->extern_count; i++) {
+    if (e->w->externs[i].name == name && e->w->externs[i].fn != NULL) {
+      return e->w->externs[i].fn(e->w->externs[i].ctx, left, right, e->syms,
+                                 out);
+    }
+  }
+  return BS_ERR_UNSUPPORTED;
+}
+
 static bs_status bs_enter_closure(bs_eval *e, bs_machine *m,
                                   uint32_t closure_op, const bs_term *arg) {
   const bs_op *op;
@@ -891,9 +909,15 @@ again:
           st = bs_push(e, result);
         }
         break;
+      case BS_U_FFI:
+        st = bs_call_extern(e, op->as.ffi, a, NULL, &result);
+        if (st == BS_OK) {
+          st = bs_push(e, result);
+        }
+        break;
       default:
         st = BS_ERR_UNSUPPORTED;
-        goto failed; /* external calls */
+        goto failed;
       }
       if (st != BS_OK) {
         goto failed;
@@ -1101,10 +1125,18 @@ again:
       st = bs_enter_closure(e, &m, a.as.list.at, NULL);
       break;
 
+    case BS_B_FFI: {
+      bs_term called;
+      st = bs_call_extern(e, op->as.ffi, a, &b, &called);
+      if (st == BS_OK) {
+        st = bs_push(e, called);
+      }
+      break;
+    }
+
     default:
-      /* String operations, set algebra and external calls. Refused rather
-       * than approximated: an operator that silently returns false is a check
-       * that silently passes. */
+      /* Refused rather than approximated: an operator that silently returns
+       * false is a check that silently passes. */
       st = BS_ERR_UNSUPPORTED;
       goto failed;
     }

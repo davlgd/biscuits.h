@@ -125,7 +125,7 @@ Claims without a number in this table are not yet claims.
 | Differential fuzzing vs `biscuit-rust` | Same input, both implementations, verdicts compared | not started |
 | Wire decoder bounded model checking | CBMC over the protobuf and base64 decoders | not started |
 | Constant-time secret handling | Valgrind/TIMECOP technique on the Linux job | not started |
-| Specification conformance | 35 of the 38 official sample tokens | decode 47/47, revocation ids 42/42, signatures 46/46, blocks 42/42, authorize 47/47 — every tier green, no failures |
+| Specification conformance | 36 of the 38 official sample tokens | decode 48/48, revocation ids 43/43, signatures 47/47, blocks 43/43, authorize 48/48 — every tier green, no failures |
 | Ed25519 against RFC 8032 vectors | `make unit`, positive and rejection cases | passing |
 | Signature malleability rejected | non-canonical scalars (S >= L) and small-order public keys refused, matching the reference's strict verification | passing, after a defect |
 | Worst-case stack bounded | `make stack` — compiler frame sizes over the call graph, exact because there is no recursion | 6 592 bytes, gated at 8 KB |
@@ -138,12 +138,17 @@ Out of scope for 1.0, and deliberately so:
 
 - **ECDSA `secp256r1`.** Roughly 2000 lines of constant-time curve arithmetic
   for two of the 38 conformance cases. Deferred to 1.1 rather than rushed.
-- **External calls (`extern::`) are refused.** The specification defines the
-  opcode, not the meaning of any particular function, and supporting them
-  needs a caller-supplied function pointer -- an indirect call, which is what
-  the worst-case stack measurement cannot follow. One conformance case
-  (`test035_ffi`) depends on them. Deferred to 1.1, and refused rather than
-  guessed in the meantime.
+- **External calls (`extern::`) reach a function the host registers, and the
+  library never supplies one.** The specification defines the opcode and says
+  the meaning is implementation-defined, so a built-in `extern::` would be
+  this implementation inventing semantics the specification declines to fix.
+  An unregistered name fails the expression rather than evaluating to
+  anything. This is the library's one indirect call, and it is the boundary of
+  two guarantees: the measured stack figure covers library frames up to that
+  call, and the no-recursion proof cannot see through it — a host function
+  that re-enters the library is the host's responsibility. `make invariants`
+  pins it as the *only* indirect call site, so a second one cannot appear
+  unnoticed.
   Tokens using it are rejected with `BS_ERR_UNSUPPORTED`, never
   mis-verified as valid.
 - **Token minting and attenuation.** Verification is what runs at the edge and

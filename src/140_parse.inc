@@ -452,7 +452,8 @@ typedef struct bs_opstack {
    * can go unevaluated; `try_or`, whose receiver becomes one for the same
    * reason; and a closure written as such. */
   size_t out;
-  uint64_t param; /* BS_S_CLOSURE: the bound variable */
+  uint64_t param; /* BS_S_CLOSURE: the bound variable, BS_S_METHOD: the
+                   * external call's name */
 } bs_opstack;
 
 /* Is this connective one that must not evaluate its right-hand side unless
@@ -483,6 +484,17 @@ static bs_status bs_p_emit_op(bs_op *out, size_t *n, size_t cap, uint8_t tag,
   op.tag = tag;
   op.kind = kind;
   op.as.ffi = 0;
+  return bs_p_emit(out, n, cap, op);
+}
+
+/* An external call carries the name it reaches, which an ordinary operator
+ * does not have. */
+static bs_status bs_p_emit_ffi(bs_op *out, size_t *n, size_t cap, uint8_t tag,
+                               uint32_t kind, uint64_t name) {
+  bs_op op;
+  op.tag = tag;
+  op.kind = kind;
+  op.as.ffi = name;
   return bs_p_emit(out, n, cap, op);
 }
 
@@ -647,7 +659,10 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
     if (bs_p_is_punct(p, (uint8_t)BS_P_DOT)) {
       uint32_t kind = 0;
       int nullary = 0;
+      int is_extern = 0;
+      uint64_t ffi = 0;
       bs_span name;
+      bs_span prefix;
 
       st = bs_p_advance(p);
       if (st != BS_OK) {
@@ -657,10 +672,23 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         return BS_ERR_MALFORMED;
       }
       name = p->tok.text;
-      if (!bs_p_method(name, &kind, &nullary)) {
-        /* External calls are implementation-defined and this build defines
-         * none, so one is refused rather than quietly ignored. */
-        return BS_ERR_UNSUPPORTED;
+      if (bs_span_slice(name, 0U, 8U, &prefix) &&
+          bs_span_eq(prefix, bs_span_make("extern::", 8U))) {
+        /* An external call reaches a function the host registered. Its name
+         * is interned like any other symbol; whether anything answers to it
+         * is settled at evaluation, not here. */
+        if (!bs_span_slice(name, 8U, name.n - 8U, &prefix) || prefix.n == 0U) {
+          return BS_ERR_MALFORMED;
+        }
+        st = bs_symtab_intern(p->syms, prefix, &ffi);
+        if (st != BS_OK) {
+          return st;
+        }
+        kind = BS_U_FFI; /* replaced by BS_B_FFI if an argument follows */
+        nullary = 0;
+        is_extern = 1;
+      } else if (!bs_p_method(name, &kind, &nullary)) {
+        return BS_ERR_MALFORMED;
       }
       st = bs_p_advance(p);
       if (st != BS_OK) {
@@ -669,6 +697,17 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
       st = bs_p_expect(p, (uint8_t)BS_P_LPAREN);
       if (st != BS_OK) {
         return st;
+      }
+      if (is_extern && bs_p_is_punct(p, (uint8_t)BS_P_RPAREN)) {
+        st = bs_p_advance(p);
+        if (st != BS_OK) {
+          return st;
+        }
+        st = bs_p_emit_ffi(out, &n, cap, (uint8_t)BS_OP_UNARY, BS_U_FFI, ffi);
+        if (st != BS_OK) {
+          return st;
+        }
+        continue;
       }
       if (nullary) {
         st = bs_p_expect(p, (uint8_t)BS_P_RPAREN);
@@ -693,7 +732,8 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         }
       }
       stack[depth].what = (uint8_t)BS_S_METHOD;
-      stack[depth].kind = kind;
+      stack[depth].kind = is_extern ? BS_B_FFI : kind;
+      stack[depth].param = ffi;
       stack[depth].out = operand_at;
       depth++;
       want_operand = 1;
@@ -726,8 +766,8 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
           }
           closed = 1;
         } else if (stack[depth].what == (uint8_t)BS_S_METHOD) {
-          st = bs_p_emit_op(out, &n, cap, (uint8_t)BS_OP_BINARY,
-                            stack[depth].kind);
+          st = bs_p_emit_ffi(out, &n, cap, (uint8_t)BS_OP_BINARY,
+                             stack[depth].kind, stack[depth].param);
           if (st != BS_OK) {
             return st;
           }

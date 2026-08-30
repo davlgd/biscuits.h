@@ -93,6 +93,20 @@ POINTER_ARITHMETIC_SITES = {
     "bs_p_unhex",
 }
 
+# Invariant 2 has one boundary, and this is it. An indirect call is an edge
+# the call graph cannot follow, so the no-recursion proof and the stack
+# measurement both stop here: a host function that re-enters the library is
+# the host's responsibility. One site is a documented boundary; a second one
+# nobody noticed would quietly turn both proofs into claims.
+INDIRECT_CALL_SITES = {
+    "bs_call_extern",  # reaches a function the host registered
+}
+
+# At -O0 a direct call names its callee with `@`; an indirect one calls
+# through a register. Lines carrying an `@` are excluded, which is what tells
+# the two apart.
+INDIRECT_CALL_RE = re.compile(r"\b(?:call|invoke)\b[^(\n]*?%[\w.]+\s*\(")
+
 
 def build_object(cc: str, header: pathlib.Path, tmp: pathlib.Path) -> pathlib.Path:
     src = tmp / "unit.c"
@@ -149,6 +163,7 @@ def check_recursion(cc: str, header: pathlib.Path, tmp: pathlib.Path) -> list:
     ).stdout
 
     graph, current = {}, None
+    indirect = set()
     for line in ir.splitlines():
         m = DEFINE_RE.match(line)
         if m:
@@ -158,19 +173,31 @@ def check_recursion(cc: str, header: pathlib.Path, tmp: pathlib.Path) -> list:
         if line.startswith("}"):
             current = None
             continue
-        if current is not None:
-            for callee in CALL_RE.findall(line):
-                if not callee.startswith("llvm."):
-                    graph[current].add(callee)
+        if current is None:
+            continue
+        if "@" not in line and INDIRECT_CALL_RE.search(line):
+            indirect.add(current)
+        for callee in CALL_RE.findall(line):
+            if not callee.startswith("llvm."):
+                graph[current].add(callee)
 
     if not graph:
         return ["could not build a call graph: no function definitions in the IR"]
+
+    problems = [
+        f"indirect call in {fn!r}, which is not in INDIRECT_CALL_SITES "
+        "(invariant 2: the call graph cannot follow it)"
+        for fn in sorted(indirect - INDIRECT_CALL_SITES)
+    ]
+    problems += [
+        f"{fn!r} is listed in INDIRECT_CALL_SITES but makes no indirect call"
+        for fn in sorted(INDIRECT_CALL_SITES - indirect)
+    ]
 
     # Iterative depth-first cycle detection: the checker that enforces "no
     # recursion" does not itself recurse.
     WHITE, GREY, BLACK = 0, 1, 2
     colour = {f: WHITE for f in graph}
-    problems = []
 
     for root in sorted(graph):
         if colour[root] != WHITE:

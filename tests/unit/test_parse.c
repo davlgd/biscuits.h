@@ -249,6 +249,7 @@ static void test_refusals(void) {
   CHECK(refuses("check if 1 + 2)"));       /* a parenthesis closing nothing */
   CHECK(refuses("f($x)"));                 /* a fact may not hold a variable */
   CHECK(refuses("check if \"a\".nope()")); /* an unknown method */
+  CHECK(refuses("check if 1.extern::()")); /* an external call with no name */
   CHECK(refuses("check"));                 /* a keyword with nothing after */
   CHECK(refuses("check all"));             /* likewise */
   CHECK(refuses("allow"));                 /* a policy with no condition */

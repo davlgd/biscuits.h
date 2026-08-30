@@ -193,6 +193,37 @@ static void note(const char *where, bs_status st) {
   }
 }
 
+/* The external call the specification's own sample reaches.
+ *
+ * `extern::test` is not part of the Biscuit specification: the specification
+ * defines the opcode and says the meaning is supplied by the host language,
+ * and the sample was produced by a harness that registered this one. So it
+ * lives here, in the harness, exactly as it does there -- a built-in
+ * `extern::test` inside the library would be this implementation inventing
+ * semantics the specification declines to fix.
+ *
+ * With no argument it returns its receiver; with one it reports whether the
+ * two are equal, which is what `test035_ffi.bc` asks of it. */
+static bs_status extern_test(void *ctx, bs_term left, const bs_term *right,
+                             bs_symtab *syms, bs_term *out) {
+  (void)ctx;
+  if (right == NULL) {
+    *out = left;
+    return BS_OK;
+  }
+  {
+    const char *answer = "different strings";
+    size_t n = sizeof "different strings" - 1U;
+    if (left.kind == right->kind && left.kind == (uint8_t)BS_T_STRING &&
+        left.as.sym == right->as.sym) {
+      answer = "equal strings";
+      n = sizeof "equal strings" - 1U;
+    }
+    out->kind = (uint8_t)BS_T_STRING;
+    return bs_symtab_intern(syms, bs_span_make(answer, n), &out->as.sym);
+  }
+}
+
 /* Load every block into the world, add the authorizer's own statements, and
  * decide. */
 static void emit_authorize(const bs_token *t, const bs_tables *tab,
@@ -210,6 +241,18 @@ static void emit_authorize(const bs_token *t, const bs_tables *tab,
     note("init", BS_ERR_NOMEM);
     emit_result_error("format");
     return;
+  }
+
+  {
+    static bs_extern externs[1];
+    if (bs_symtab_intern(&syms, bs_span_make("test", 4U), &externs[0].name) !=
+            BS_OK ||
+        bs_world_set_externs(&world, externs, 1U) != BS_OK) {
+      emit_result_error("format");
+      return;
+    }
+    externs[0].fn = extern_test;
+    externs[0].ctx = NULL;
   }
 
   /* Facts first, then rules and checks: a rule may only be loaded once the

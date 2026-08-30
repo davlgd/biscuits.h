@@ -734,6 +734,39 @@ typedef struct bs_policy {
   uint8_t kind;
 } bs_policy;
 
+/* --------------------------------------------------------------------------
+ * External calls
+ *
+ * The specification defines the opcode and says the meaning is
+ * implementation-defined: an external call reaches a function the host
+ * language provides. So the library supplies the mechanism and never a
+ * function -- a built-in `extern::` would be this implementation inventing
+ * semantics the specification declines to fix.
+ *
+ * `left` is the receiver. `right` is the argument, or NULL for a call
+ * written with none. Return anything but BS_OK to fail the expression, which
+ * is what `try_or` catches.
+ *
+ * This is the one indirect call in the library, and it is the boundary of two
+ * guarantees: the measured worst-case stack covers library frames up to this
+ * call, and the no-recursion proof cannot see through it. A callback that
+ * re-enters the library is the host's responsibility, not something the tools
+ * can rule out. `tools/check_invariants.py` pins this as the only indirect
+ * call site, so a second one cannot appear unnoticed.
+ * ----------------------------------------------------------------------- */
+/* Forward-declared: the symbol table is described further down, and a
+ * callback that interns a string it returns needs it here. */
+struct bs_symtab;
+
+typedef bs_status (*bs_extern_fn)(void *ctx, bs_term left, const bs_term *right,
+                                  struct bs_symtab *syms, bs_term *out);
+
+typedef struct bs_extern {
+  uint64_t name; /* the call's name, interned in the world's symbol table */
+  bs_extern_fn fn;
+  void *ctx;
+} bs_extern;
+
 /* The pools.
  *
  * Sized once from the caller's arena and never grown: the counting pass that
@@ -781,6 +814,11 @@ typedef struct bs_world {
   size_t policy_cap;
 
   const bs_tables *tables; /* symbols and public keys, borrowed */
+  /* External calls the host registered, borrowed. Empty by default: an
+   * `extern::` in a token then fails the expression rather than resolving to
+   * something this library made up. */
+  const bs_extern *externs;
+  size_t extern_count;
   size_t block_count;
 } bs_world;
 
@@ -917,6 +955,13 @@ BS_API BS_MUST_USE bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms,
  * `token` and `tables` are needed only to resolve a `trusting ed25519/...`
  * annotation to the blocks that key signed; both may be NULL when the source
  * names no public key. */
+/* Register the external calls a token may reach. The array is borrowed and
+ * must outlive the world. Names are interned with bs_symtab_intern, so
+ * register after the symbol table exists and before evaluating. */
+BS_API BS_MUST_USE bs_status bs_world_set_externs(bs_world *w,
+                                                  const bs_extern *externs,
+                                                  size_t count);
+
 BS_API BS_MUST_USE bs_status bs_world_parse(bs_world *w, bs_symtab *syms,
                                             bs_arena *a, bs_span source,
                                             size_t block, const bs_token *token,
@@ -4904,6 +4949,16 @@ BS_API bs_limits bs_limits_default(void) {
   return l;
 }
 
+BS_API bs_status bs_world_set_externs(bs_world *w, const bs_extern *externs,
+                                      size_t count) {
+  if (w == NULL || (externs == NULL && count > 0U)) {
+    return BS_ERR_ARGUMENT;
+  }
+  w->externs = externs;
+  w->extern_count = count;
+  return BS_OK;
+}
+
 BS_API bs_status bs_world_init(bs_world *w, bs_arena *a, const bs_tables *tab,
                                size_t block_count, const bs_limits *lim) {
   bs_limits l;
@@ -7569,6 +7624,24 @@ static bs_term bs_iter_at(const bs_world *w, bs_term subject, uint32_t index) {
   return out;
 }
 
+/* Reach a function the host registered.
+ *
+ * The one indirect call in the library. An unregistered name fails the
+ * expression rather than evaluating to anything: a call to a function nobody
+ * supplied has no answer, and inventing one would authorize on a guess. */
+static bs_status bs_call_extern(bs_eval *e, uint64_t name, bs_term left,
+                                const bs_term *right, bs_term *out) {
+  size_t i;
+
+  for (i = 0; i < e->w->extern_count; i++) {
+    if (e->w->externs[i].name == name && e->w->externs[i].fn != NULL) {
+      return e->w->externs[i].fn(e->w->externs[i].ctx, left, right, e->syms,
+                                 out);
+    }
+  }
+  return BS_ERR_UNSUPPORTED;
+}
+
 static bs_status bs_enter_closure(bs_eval *e, bs_machine *m,
                                   uint32_t closure_op, const bs_term *arg) {
   const bs_op *op;
@@ -7789,9 +7862,15 @@ again:
           st = bs_push(e, result);
         }
         break;
+      case BS_U_FFI:
+        st = bs_call_extern(e, op->as.ffi, a, NULL, &result);
+        if (st == BS_OK) {
+          st = bs_push(e, result);
+        }
+        break;
       default:
         st = BS_ERR_UNSUPPORTED;
-        goto failed; /* external calls */
+        goto failed;
       }
       if (st != BS_OK) {
         goto failed;
@@ -7999,10 +8078,18 @@ again:
       st = bs_enter_closure(e, &m, a.as.list.at, NULL);
       break;
 
+    case BS_B_FFI: {
+      bs_term called;
+      st = bs_call_extern(e, op->as.ffi, a, &b, &called);
+      if (st == BS_OK) {
+        st = bs_push(e, called);
+      }
+      break;
+    }
+
     default:
-      /* String operations, set algebra and external calls. Refused rather
-       * than approximated: an operator that silently returns false is a check
-       * that silently passes. */
+      /* Refused rather than approximated: an operator that silently returns
+       * false is a check that silently passes. */
       st = BS_ERR_UNSUPPORTED;
       goto failed;
     }
@@ -9516,7 +9603,8 @@ typedef struct bs_opstack {
    * can go unevaluated; `try_or`, whose receiver becomes one for the same
    * reason; and a closure written as such. */
   size_t out;
-  uint64_t param; /* BS_S_CLOSURE: the bound variable */
+  uint64_t param; /* BS_S_CLOSURE: the bound variable, BS_S_METHOD: the
+                   * external call's name */
 } bs_opstack;
 
 /* Is this connective one that must not evaluate its right-hand side unless
@@ -9547,6 +9635,17 @@ static bs_status bs_p_emit_op(bs_op *out, size_t *n, size_t cap, uint8_t tag,
   op.tag = tag;
   op.kind = kind;
   op.as.ffi = 0;
+  return bs_p_emit(out, n, cap, op);
+}
+
+/* An external call carries the name it reaches, which an ordinary operator
+ * does not have. */
+static bs_status bs_p_emit_ffi(bs_op *out, size_t *n, size_t cap, uint8_t tag,
+                               uint32_t kind, uint64_t name) {
+  bs_op op;
+  op.tag = tag;
+  op.kind = kind;
+  op.as.ffi = name;
   return bs_p_emit(out, n, cap, op);
 }
 
@@ -9711,7 +9810,10 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
     if (bs_p_is_punct(p, (uint8_t)BS_P_DOT)) {
       uint32_t kind = 0;
       int nullary = 0;
+      int is_extern = 0;
+      uint64_t ffi = 0;
       bs_span name;
+      bs_span prefix;
 
       st = bs_p_advance(p);
       if (st != BS_OK) {
@@ -9721,10 +9823,23 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         return BS_ERR_MALFORMED;
       }
       name = p->tok.text;
-      if (!bs_p_method(name, &kind, &nullary)) {
-        /* External calls are implementation-defined and this build defines
-         * none, so one is refused rather than quietly ignored. */
-        return BS_ERR_UNSUPPORTED;
+      if (bs_span_slice(name, 0U, 8U, &prefix) &&
+          bs_span_eq(prefix, bs_span_make("extern::", 8U))) {
+        /* An external call reaches a function the host registered. Its name
+         * is interned like any other symbol; whether anything answers to it
+         * is settled at evaluation, not here. */
+        if (!bs_span_slice(name, 8U, name.n - 8U, &prefix) || prefix.n == 0U) {
+          return BS_ERR_MALFORMED;
+        }
+        st = bs_symtab_intern(p->syms, prefix, &ffi);
+        if (st != BS_OK) {
+          return st;
+        }
+        kind = BS_U_FFI; /* replaced by BS_B_FFI if an argument follows */
+        nullary = 0;
+        is_extern = 1;
+      } else if (!bs_p_method(name, &kind, &nullary)) {
+        return BS_ERR_MALFORMED;
       }
       st = bs_p_advance(p);
       if (st != BS_OK) {
@@ -9733,6 +9848,17 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
       st = bs_p_expect(p, (uint8_t)BS_P_LPAREN);
       if (st != BS_OK) {
         return st;
+      }
+      if (is_extern && bs_p_is_punct(p, (uint8_t)BS_P_RPAREN)) {
+        st = bs_p_advance(p);
+        if (st != BS_OK) {
+          return st;
+        }
+        st = bs_p_emit_ffi(out, &n, cap, (uint8_t)BS_OP_UNARY, BS_U_FFI, ffi);
+        if (st != BS_OK) {
+          return st;
+        }
+        continue;
       }
       if (nullary) {
         st = bs_p_expect(p, (uint8_t)BS_P_RPAREN);
@@ -9757,7 +9883,8 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         }
       }
       stack[depth].what = (uint8_t)BS_S_METHOD;
-      stack[depth].kind = kind;
+      stack[depth].kind = is_extern ? BS_B_FFI : kind;
+      stack[depth].param = ffi;
       stack[depth].out = operand_at;
       depth++;
       want_operand = 1;
@@ -9790,8 +9917,8 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
           }
           closed = 1;
         } else if (stack[depth].what == (uint8_t)BS_S_METHOD) {
-          st = bs_p_emit_op(out, &n, cap, (uint8_t)BS_OP_BINARY,
-                            stack[depth].kind);
+          st = bs_p_emit_ffi(out, &n, cap, (uint8_t)BS_OP_BINARY,
+                             stack[depth].kind, stack[depth].param);
           if (st != BS_OK) {
             return st;
           }

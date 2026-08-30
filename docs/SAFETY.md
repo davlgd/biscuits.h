@@ -55,8 +55,18 @@ catch. Here, exceeding the bound is `BS_ERR_DEPTH` — an ordinary error return.
 Maximum stack usage is therefore a compile-time constant rather than a
 function of the input. The constant is measured, not estimated: `make stack`
 combines the compiler's own `-fstack-usage` frame sizes with the call graph
-from the LLVM IR, and because there is no recursion and no indirect call the
-deepest path is an exact longest-path over a DAG.
+from the LLVM IR, and because there is no recursion the deepest path is an
+exact longest-path over a DAG.
+
+There is exactly one indirect call in the library, and it is where an
+`extern::` expression reaches a function the host registered. That is the
+boundary of both guarantees here: the figures below cover library frames up to
+that call, and the call graph cannot see through it, so a host function that
+re-enters the library is the host's responsibility rather than something these
+tools can rule out. `make invariants` pins `bs_call_extern` as the only such
+site and fails if a second appears — the boundary is enforced, not merely
+described. A build that registers no external calls (the default) has no
+indirect call reachable at all.
 
 At `-O2` with clang on arm64, today:
 

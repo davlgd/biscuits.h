@@ -34,7 +34,6 @@ TIERS = ("decode", "revocation_ids", "signatures", "blocks", "authorize")
 # a skipped test hides a regression -- but a failure is reported as a TAP TODO
 # rather than counted against the score, and an unexpected pass is flagged.
 KNOWN_UNSUPPORTED = {
-    "test035_ffi.bc": "external calls, deferred to 1.1 (SECURITY.md)",
     "test036_secp256r1.bc": "ECDSA secp256r1, deferred to 1.1 (SECURITY.md)",
     "test037_secp256r1_third_party.bc": "ECDSA secp256r1, deferred to 1.1 (SECURITY.md)",
 }

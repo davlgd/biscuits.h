@@ -21,6 +21,16 @@ BS_API bs_limits bs_limits_default(void) {
   return l;
 }
 
+BS_API bs_status bs_world_set_externs(bs_world *w, const bs_extern *externs,
+                                      size_t count) {
+  if (w == NULL || (externs == NULL && count > 0U)) {
+    return BS_ERR_ARGUMENT;
+  }
+  w->externs = externs;
+  w->extern_count = count;
+  return BS_OK;
+}
+
 BS_API bs_status bs_world_init(bs_world *w, bs_arena *a, const bs_tables *tab,
                                size_t block_count, const bs_limits *lim) {
   bs_limits l;

@@ -225,6 +225,112 @@ static void test_no_block_can_hold_the_authorizer_bit(void) {
   }
 }
 
+/* --------------------------------------------------------------------------
+ * External calls
+ *
+ * The library supplies the mechanism and never a function: the specification
+ * defines the opcode and leaves the meaning to the host, so a built-in
+ * `extern::` would be this implementation inventing semantics the
+ * specification declines to fix.
+ * ----------------------------------------------------------------------- */
+
+/* What the host passes through `ctx`: somewhere to count calls, and a switch
+ * to make the call fail. Written through rather than only read, because a
+ * context a callback cannot mutate is not much of a context. */
+typedef struct extern_ctx {
+  int calls;
+  int refuse;
+} extern_ctx;
+
+static extern_ctx CTX;
+
+/* Returns its receiver with no argument, and their sum with one. */
+static bs_status extern_add(void *ctx, bs_term left, const bs_term *right,
+                            bs_symtab *syms, bs_term *out) {
+  extern_ctx *c = (extern_ctx *)ctx;
+
+  (void)syms;
+  c->calls++;
+  if (c->refuse) {
+    return BS_ERR_TYPE; /* a callback may refuse, and the expression fails */
+  }
+  *out = left;
+  if (right != NULL) {
+    if (left.kind != (uint8_t)BS_T_INTEGER ||
+        right->kind != (uint8_t)BS_T_INTEGER) {
+      return BS_ERR_TYPE;
+    }
+    out->as.integer = left.as.integer + right->as.integer;
+  }
+  return BS_OK;
+}
+
+static bs_extern EXTERNS[1];
+
+static bs_status decide_with_externs(const char *code, int refuse) {
+  bs_status st;
+
+  if (!reset_world()) {
+    return BS_ERR_NOMEM;
+  }
+  CTX.calls = 0;
+  CTX.refuse = refuse;
+  st = bs_symtab_intern(&SYMS, bs_span_make("add", 3U), &EXTERNS[0].name);
+  if (st != BS_OK) {
+    return st;
+  }
+  EXTERNS[0].fn = extern_add;
+  EXTERNS[0].ctx = &CTX;
+  /* Cannot fail with these arguments; what it refuses is covered by
+   * test_registering_externs_checks_its_arguments. */
+  CHECK(bs_world_set_externs(&W, EXTERNS, 1U) == BS_OK);
+  st = bs_world_parse(&W, &SYMS, &A, bs_span_make(code, strlen(code)),
+                      (size_t)BS_MAX_BLOCKS, NULL, NULL);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_authorize(&W, &SYMS, &A, 0U, &V);
+}
+
+static void test_external_calls_reach_the_host(void) {
+  REQUIRE(decide_with_externs("allow if 1.extern::add(2) === 3;", 0) == BS_OK);
+  CHECK(V.kind == (uint8_t)BS_VERDICT_ALLOW);
+  CHECK(CTX.calls == 1);
+
+  /* With no argument at all. */
+  REQUIRE(decide_with_externs("allow if 7.extern::add() === 7;", 0) == BS_OK);
+  CHECK(V.kind == (uint8_t)BS_VERDICT_ALLOW);
+  CHECK(CTX.calls == 1);
+}
+
+static void test_registering_externs_checks_its_arguments(void) {
+  REQUIRE(reset_world());
+  CHECK(bs_world_set_externs(NULL, EXTERNS, 1U) == BS_ERR_ARGUMENT);
+  CHECK(bs_world_set_externs(&W, NULL, 1U) == BS_ERR_ARGUMENT);
+  /* None at all is not an error; it is the default. */
+  CHECK(bs_world_set_externs(&W, NULL, 0U) == BS_OK);
+}
+
+/* A callback that fails fails the expression, and `try_or` catches it like
+ * any other failure. */
+static void test_a_failing_external_call_fails_its_expression(void) {
+  CHECK(decide_with_externs("allow if 1.extern::add(2) === 3;", 1) ==
+        BS_ERR_TYPE);
+  REQUIRE(decide_with_externs("allow if (1.extern::add(2)).try_or(9) === 9;",
+                              1) == BS_OK);
+  CHECK(V.kind == (uint8_t)BS_VERDICT_ALLOW);
+}
+
+/* A name nobody registered has no answer, and guessing one would authorize on
+ * a guess. */
+static void test_an_unregistered_call_is_refused(void) {
+  REQUIRE(reset_world());
+  REQUIRE(bs_world_parse(&W, &SYMS, &A,
+                         bs_span_make("allow if 1.extern::nope() === 1;", 32U),
+                         (size_t)BS_MAX_BLOCKS, NULL, NULL) == BS_OK);
+  CHECK(bs_authorize(&W, &SYMS, &A, 0U, &V) == BS_ERR_UNSUPPORTED);
+}
+
 int main(void) {
   test_a_matching_allow_authorizes();
   test_the_first_matching_policy_decides();
@@ -237,5 +343,9 @@ int main(void) {
   test_derived_facts_are_visible_to_policies();
   test_authorizer_facts_have_their_own_origin();
   test_no_block_can_hold_the_authorizer_bit();
+  test_external_calls_reach_the_host();
+  test_registering_externs_checks_its_arguments();
+  test_a_failing_external_call_fails_its_expression();
+  test_an_unregistered_call_is_refused();
   return bs_test_finish();
 }

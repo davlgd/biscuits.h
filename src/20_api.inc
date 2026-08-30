@@ -529,6 +529,39 @@ typedef struct bs_policy {
   uint8_t kind;
 } bs_policy;
 
+/* --------------------------------------------------------------------------
+ * External calls
+ *
+ * The specification defines the opcode and says the meaning is
+ * implementation-defined: an external call reaches a function the host
+ * language provides. So the library supplies the mechanism and never a
+ * function -- a built-in `extern::` would be this implementation inventing
+ * semantics the specification declines to fix.
+ *
+ * `left` is the receiver. `right` is the argument, or NULL for a call
+ * written with none. Return anything but BS_OK to fail the expression, which
+ * is what `try_or` catches.
+ *
+ * This is the one indirect call in the library, and it is the boundary of two
+ * guarantees: the measured worst-case stack covers library frames up to this
+ * call, and the no-recursion proof cannot see through it. A callback that
+ * re-enters the library is the host's responsibility, not something the tools
+ * can rule out. `tools/check_invariants.py` pins this as the only indirect
+ * call site, so a second one cannot appear unnoticed.
+ * ----------------------------------------------------------------------- */
+/* Forward-declared: the symbol table is described further down, and a
+ * callback that interns a string it returns needs it here. */
+struct bs_symtab;
+
+typedef bs_status (*bs_extern_fn)(void *ctx, bs_term left, const bs_term *right,
+                                  struct bs_symtab *syms, bs_term *out);
+
+typedef struct bs_extern {
+  uint64_t name; /* the call's name, interned in the world's symbol table */
+  bs_extern_fn fn;
+  void *ctx;
+} bs_extern;
+
 /* The pools.
  *
  * Sized once from the caller's arena and never grown: the counting pass that
@@ -576,6 +609,11 @@ typedef struct bs_world {
   size_t policy_cap;
 
   const bs_tables *tables; /* symbols and public keys, borrowed */
+  /* External calls the host registered, borrowed. Empty by default: an
+   * `extern::` in a token then fails the expression rather than resolving to
+   * something this library made up. */
+  const bs_extern *externs;
+  size_t extern_count;
   size_t block_count;
 } bs_world;
 
@@ -712,6 +750,13 @@ BS_API BS_MUST_USE bs_status bs_expr_evaluate(bs_world *w, bs_symtab *syms,
  * `token` and `tables` are needed only to resolve a `trusting ed25519/...`
  * annotation to the blocks that key signed; both may be NULL when the source
  * names no public key. */
+/* Register the external calls a token may reach. The array is borrowed and
+ * must outlive the world. Names are interned with bs_symtab_intern, so
+ * register after the symbol table exists and before evaluating. */
+BS_API BS_MUST_USE bs_status bs_world_set_externs(bs_world *w,
+                                                  const bs_extern *externs,
+                                                  size_t count);
+
 BS_API BS_MUST_USE bs_status bs_world_parse(bs_world *w, bs_symtab *syms,
                                             bs_arena *a, bs_span source,
                                             size_t block, const bs_token *token,
