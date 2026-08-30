@@ -69,6 +69,12 @@ typedef struct bs_token_t {
 typedef struct bs_lexer {
   bs_span src;
   size_t pos;
+  /* Whether the token just consumed was an operand. `-` is the sign of a
+   * number literal or the subtraction operator, and nothing about the
+   * character says which: the grammar makes the space optional, so `3-2` is
+   * a subtraction while `f(-2)` is a negative literal. Only the parser knows
+   * which it is expecting, so it says. */
+  int after_operand;
 } bs_lexer;
 
 static int bs_is_space(uint8_t c) {
@@ -185,9 +191,26 @@ static bs_status bs_lex_date(const bs_lexer *l, size_t start, uint64_t *out,
     p++;
   }
 
-  if (part[1] < 1U || part[1] > 12U || part[2] < 1U || part[2] > 31U ||
-      part[3] > 23U || part[4] > 59U || part[5] > 60U) {
+  if (part[1] < 1U || part[1] > 12U || part[2] < 1U || part[3] > 23U ||
+      part[4] > 59U || part[5] > 60U) {
     return BS_ERR_MALFORMED;
+  }
+  {
+    /* Days per month, with February decided by the year. A flat 1..31 bound
+     * would accept the 31st of February, and the conversion below would then
+     * silently normalise it into a different instant rather than refusing --
+     * two spellings for one moment, one of which nobody wrote on purpose. */
+    static const uint64_t DAYS[12] = {
+        31U, 28U, 31U, 30U, 31U, 30U, 31U, 31U, 30U, 31U, 30U, 31U,
+    };
+    uint64_t limit = DAYS[part[1] - 1U];
+    if (part[1] == 2U && (part[0] % 4U) == 0U &&
+        ((part[0] % 100U) != 0U || (part[0] % 400U) == 0U)) {
+      limit = 29U;
+    }
+    if (part[2] > limit) {
+      return BS_ERR_MALFORMED;
+    }
   }
   /* Dates are unsigned seconds since the epoch, so nothing before 1970 is
    * expressible and refusing is the only honest answer. */
@@ -269,10 +292,11 @@ static bs_status bs_lex_next(bs_lexer *l, bs_token_t *t) {
     return BS_ERR_MALFORMED; /* unterminated */
   }
 
-  /* A number, or a date, which starts like one. */
+  /* A number, or a date, which starts like one. A leading `-` is part of the
+   * number only where an operand is expected; after one it is subtraction. */
   if (bs_is_digit(c) ||
-      (c == (uint8_t)'-' && bs_span_at(l->src, l->pos + 1U, &d) &&
-       bs_is_digit(d))) {
+      (c == (uint8_t)'-' && !l->after_operand &&
+       bs_span_at(l->src, l->pos + 1U, &d) && bs_is_digit(d))) {
     int negative = (c == (uint8_t)'-');
     size_t digits = 0;
     uint64_t value = 0;

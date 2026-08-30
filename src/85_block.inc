@@ -301,7 +301,13 @@ BS_API bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
       (uint64_t)key >= (uint64_t)tab->public_key_count) {
     return BS_ERR_MALFORMED;
   }
-  return bs_print_public_key(w, &tab->public_keys[(size_t)key]);
+  {
+    bs_status st = bs_print_public_key(w, &tab->public_keys[(size_t)key]);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* `name(term, term, ...)`, the shape shared by facts, rule heads and rule
@@ -357,7 +363,7 @@ BS_API bs_status bs_predicate_print(bs_writer *w, const bs_tables *tab,
   }
 
   bs_put_byte(w, (uint8_t)')');
-  return BS_OK;
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* A Fact is a Predicate in a one-field wrapper. */
@@ -386,5 +392,11 @@ BS_API bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
   if (found != 1) {
     return BS_ERR_MALFORMED;
   }
-  return bs_predicate_print(w, tab, pred);
+  {
+    bs_status st = bs_predicate_print(w, tab, pred);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }

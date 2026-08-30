@@ -30,7 +30,10 @@ Expect an acknowledgement within a week.
 ## What has gone wrong so far
 
 Recording this because a security file that only lists what passes is a
-marketing document.
+marketing document. Nine of the entries below were found after the code passed
+every gate in CI, most of them by adversarial review rather than by a test --
+which is the useful lesson: a green suite means the tests pass, not that the
+code is right.
 
 **Signature malleability.** An adversarial review found that the vendored
 NaCl verifier accepts a non-canonical scalar: L*B is the identity, so S and
@@ -66,6 +69,72 @@ them collides.
 The lesson here is about arithmetic that reads as obviously right. "Sixty-four
 blocks, sixty-four bits" is the kind of correspondence that survives review
 precisely because it looks like a fit rather than a coincidence.
+
+**A scope annotation that inverted itself.** `trusting previous` is defined as
+"the current block and every block before it", and the specification adds that
+it "is ignored when used in the authorizer". This implementation reasoned that
+the authorizer sits at the end of the chain, so for it `previous` should mean
+every block there is -- and wrote that down as a comment explaining the choice.
+It is the opposite of what the specification says, and it fails in the unsafe
+direction: an annotation whose job is to *narrow* the trusted set to nothing
+instead widened it to include every block an attacker had appended. Reproduced
+on an unmodified specification sample, where an authorizer policy written
+`allow if right($r, $op) ... trusting previous` matched a right that an
+appended block had granted itself and the authority never issued. Found by an
+adversarial review; the conformance suite could not have caught it, because no
+official sample writes `trusting previous` in an authorizer.
+
+**A trust boundary the loader never read.** A block may carry its own
+`trusting` annotation covering everything in it. The wire loader looked only
+for rule-level annotations, so a block that had deliberately narrowed what its
+rules and checks could see silently got the default set instead -- wider, and
+containing exactly what the block had asked to exclude. The printer already
+knew the field existed and refused to render it, which made the gap visible to
+anyone who compared the two; nothing compared them. Now honoured on all three
+paths: loader, printer and text parser.
+
+**An unbounded join behind a bounded-looking limit.** `max_iterations` counts
+fixpoint rounds and says nothing about the work inside one round. Matching a
+body of N predicates against F facts is F^N candidate combinations, and a
+token's own blocks choose both, so a single appended rule bought an evaluation
+that terminates in theory and not in practice -- with every configured limit
+respected. `docs/SAFETY.md` cited the specification's `maxTime` as the bound,
+which this library cannot implement: bounding time needs a clock, and the
+fifth invariant is "memcpy, memcmp, memset". The bound is now on work
+(`bs_limits.max_steps`), which is deterministic where a time bound is not.
+
+**A guard that had gone missing.** `BS_PUT_LIT` takes a string literal and
+uses `sizeof` for its length. It once carried a `"" lit` concatenation that
+makes anything but a literal a syntax error; at some point that guard was
+lost, and the very next use of the macro passed a ternary -- so `sizeof`
+measured a pointer and the writer would have emitted seven bytes of whatever
+followed. Caught while writing it, not by any tool. The guard is back, with
+the reason written next to it.
+
+**An invariant check that could be evaded.** The tool that pins the library's
+single indirect call detected it by looking for a register callee on a line
+carrying no `@`. An indirect call that also mentions a global -- a string
+literal, a static table, a function address passed as an argument -- has an
+`@` on the line and was therefore invisible, so a second unpinned indirect
+call would have passed `make invariants` silently. The discriminator is now
+the callee's form alone, and the check is self-tested against exactly that
+evasion.
+
+**Printers that reported success on truncated output.** Every public printer
+except `bs_block_print` returned `BS_OK` after the writer had overflowed, so a
+caller with a small buffer got a shorter string that still reads as Datalog.
+`right("fil` is not an error; it is a different fact.
+
+**A date that was not a date.** The lexer bounded the day at 1..31 with no
+per-month limit, so `2020-02-31T00:00:00Z` was accepted and the days-from-civil
+conversion silently normalised it to the 2nd of March -- two spellings for one
+instant, one of which nobody wrote on purpose.
+
+**Subtraction read as a negative number.** The grammar makes whitespace around
+an operator optional, so `3-2` is a subtraction while `f(-2)` is a negative
+literal, and nothing about the character says which. The lexer decided on its
+own and always chose the literal, which made `3-2` a syntax error. The parser
+now says which it expects.
 
 **A stack figure that was never measured.** This documentation claimed the
 library ran in 4 KB of stack. The measured worst case is 6 592 bytes. The

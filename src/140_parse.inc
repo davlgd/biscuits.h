@@ -58,7 +58,17 @@ typedef struct bs_parser {
   bs_origin default_trust; /* what a statement with no annotation trusts */
 } bs_parser;
 
+/* Fetch the next token. What follows is expected to be an operand, which is
+ * the common case: after an operator, a comma, an opening bracket. */
 static bs_status bs_p_advance(bs_parser *p) {
+  p->lex.after_operand = 0;
+  return bs_lex_next(&p->lex, &p->tok);
+}
+
+/* Fetch the next token knowing an operand has just been consumed, so a `-`
+ * ahead is subtraction rather than the sign of a literal. */
+static bs_status bs_p_advance_after_operand(bs_parser *p) {
+  p->lex.after_operand = 1;
   return bs_lex_next(&p->lex, &p->tok);
 }
 
@@ -111,19 +121,19 @@ static bs_status bs_p_scalar(bs_parser *p, bs_term *out) {
   case BS_TK_STRING:
     out->kind = (uint8_t)BS_T_STRING;
     st = bs_symtab_intern(p->syms, p->tok.text, &out->as.sym);
-    return (st == BS_OK) ? bs_p_advance(p) : st;
+    return (st == BS_OK) ? bs_p_advance_after_operand(p) : st;
   case BS_TK_VARIABLE:
     out->kind = (uint8_t)BS_T_VARIABLE;
     st = bs_symtab_intern(p->syms, p->tok.text, &out->as.sym);
-    return (st == BS_OK) ? bs_p_advance(p) : st;
+    return (st == BS_OK) ? bs_p_advance_after_operand(p) : st;
   case BS_TK_INTEGER:
     out->kind = (uint8_t)BS_T_INTEGER;
     out->as.integer = p->tok.integer;
-    return bs_p_advance(p);
+    return bs_p_advance_after_operand(p);
   case BS_TK_DATE:
     out->kind = (uint8_t)BS_T_DATE;
     out->as.date = p->tok.date;
-    return bs_p_advance(p);
+    return bs_p_advance_after_operand(p);
   case BS_TK_BYTES: {
     size_t n = p->tok.text.n / 2U;
     uint8_t *buf = (uint8_t *)bs_arena_alloc(p->arena, (n == 0U) ? 1U : n, 1U);
@@ -135,22 +145,22 @@ static bs_status bs_p_scalar(bs_parser *p, bs_term *out) {
     }
     out->kind = (uint8_t)BS_T_BYTES;
     out->as.bytes = bs_span_make(buf, n);
-    return bs_p_advance(p);
+    return bs_p_advance_after_operand(p);
   }
   case BS_TK_IDENT:
     if (BS_WORD(p, "true")) {
       out->kind = (uint8_t)BS_T_BOOL;
       out->as.boolean = 1;
-      return bs_p_advance(p);
+      return bs_p_advance_after_operand(p);
     }
     if (BS_WORD(p, "false")) {
       out->kind = (uint8_t)BS_T_BOOL;
       out->as.boolean = 0;
-      return bs_p_advance(p);
+      return bs_p_advance_after_operand(p);
     }
     if (BS_WORD(p, "null")) {
       out->kind = (uint8_t)BS_T_NULL;
-      return bs_p_advance(p);
+      return bs_p_advance_after_operand(p);
     }
     return BS_ERR_MALFORMED;
   default:
@@ -223,7 +233,7 @@ static bs_status bs_p_term(bs_parser *p, bs_term *out) {
       value.kind = kind;
       value.as.list.at = (uint32_t)p->w->term_count;
       value.as.list.count = 0;
-      st = bs_p_advance(p);
+      st = bs_p_advance_after_operand(p);
       if (st != BS_OK) {
         return st;
       }
@@ -292,7 +302,10 @@ static bs_status bs_p_term(bs_parser *p, bs_term *out) {
       uint32_t at;
       size_t i;
 
-      st = bs_p_expect(p, f->close);
+      if (!bs_p_is_punct(p, f->close)) {
+        return BS_ERR_MALFORMED;
+      }
+      st = bs_p_advance_after_operand(p);
       if (st != BS_OK) {
         return st;
       }
@@ -699,7 +712,7 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         return st;
       }
       if (is_extern && bs_p_is_punct(p, (uint8_t)BS_P_RPAREN)) {
-        st = bs_p_advance(p);
+        st = bs_p_advance_after_operand(p);
         if (st != BS_OK) {
           return st;
         }
@@ -710,7 +723,10 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         continue;
       }
       if (nullary) {
-        st = bs_p_expect(p, (uint8_t)BS_P_RPAREN);
+        if (!bs_p_is_punct(p, (uint8_t)BS_P_RPAREN)) {
+          return BS_ERR_MALFORMED;
+        }
+        st = bs_p_advance_after_operand(p);
         if (st != BS_OK) {
           return st;
         }
@@ -783,7 +799,7 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
           }
         }
       }
-      st = bs_p_advance(p);
+      st = bs_p_advance_after_operand(p);
       if (st != BS_OK) {
         return st;
       }
@@ -943,13 +959,18 @@ static bs_status bs_p_scope(bs_parser *p, bs_origin *add) {
     return bs_p_advance(p);
   }
   if (BS_WORD(p, "previous")) {
-    /* Every block up to and including the one that said this. The authorizer
-     * has no position in the chain, so for it the annotation means every
-     * block there is. */
-    size_t last =
-        (p->block >= (size_t)BS_MAX_BLOCKS) ? p->w->block_count : p->block + 1U;
-    for (i = 0; i < last && i < (size_t)BS_MAX_BLOCKS; i++) {
-      *add |= BS_ORIGIN_ONE(i);
+    /* Every block up to and including the one that said this.
+     *
+     * In the authorizer it names nothing at all. The specification is explicit
+     * -- "`previous` is only available in blocks, and is ignored when used in
+     * the authorizer" -- and reading it as "every block there is" instead, on
+     * the reasoning that the authorizer sits at the end of the chain, inverts
+     * the annotation: one that should narrow the trusted set to nothing would
+     * widen it to include every block an attacker appended. */
+    if (p->block < (size_t)BS_MAX_BLOCKS) {
+      for (i = 0; i <= p->block && i < (size_t)BS_MAX_BLOCKS; i++) {
+        *add |= BS_ORIGIN_ONE(i);
+      }
     }
     return bs_p_advance(p);
   }
@@ -1353,6 +1374,24 @@ BS_API bs_status bs_world_parse(bs_world *w, bs_symtab *syms, bs_arena *a,
   st = bs_p_advance(&p);
   if (st != BS_OK) {
     return st;
+  }
+
+  /* A block may open with a trust annotation that applies to everything in
+   * it: `<block> ::= (<origin_clause> ";" <sp>?)? ...`. A statement of its own
+   * still overrides it. The authorizer has no such clause -- it is not a
+   * block -- so one there is a syntax error rather than a wider default. */
+  if (BS_WORD(&p, "trusting")) {
+    if (block >= (size_t)BS_MAX_BLOCKS) {
+      return BS_ERR_MALFORMED;
+    }
+    st = bs_p_trusting(&p, &p.default_trust);
+    if (st != BS_OK) {
+      return st;
+    }
+    st = bs_p_expect(&p, (uint8_t)BS_P_SEMI);
+    if (st != BS_OK) {
+      return st;
+    }
   }
 
   while (p.tok.kind != (uint8_t)BS_TK_EOF) {

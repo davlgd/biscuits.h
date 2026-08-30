@@ -752,9 +752,17 @@ static bs_status bs_scope_resolve(const bs_token *t, const bs_tables *tab,
 
 /* The trust set of a rule: the always-trusted pair, plus whatever its scope
  * annotations add, or the authority block when there are none. */
+/* The trust set of a rule, a check, or a block itself.
+ *
+ * `fallback` is what applies when the message carries no annotation of its
+ * own. For a rule that is the block's set; for a block it is the authority,
+ * which is the specification's default. A rule-level annotation takes
+ * precedence over the block's, and both replace the default rather than
+ * adding to it -- only the current block and the authorizer are always
+ * trusted. */
 static bs_status bs_trust_load(const bs_token *t, const bs_tables *tab,
                                size_t block_index, bs_span msg, uint32_t field,
-                               bs_origin *out) {
+                               bs_origin fallback, bs_origin *out) {
   bs_cursor c = bs_cursor_make(msg);
   bs_pb_field f;
   int annotated = 0;
@@ -778,7 +786,28 @@ static bs_status bs_trust_load(const bs_token *t, const bs_tables *tab,
     annotated = 1;
   }
   if (!annotated) {
-    trust |= BS_ORIGIN_ONE(0U);
+    trust |= fallback;
+  }
+  *out = trust;
+  return BS_OK;
+}
+
+/* What a block trusts by default: its own scope annotations if it carries
+ * any, and the authority block if it does not.
+ *
+ * Reading this field is not optional. A block that says `trusting ed25519/k`
+ * has deliberately narrowed what its own rules and checks may see, usually to
+ * exclude the authority. Ignoring the annotation hands those rules the
+ * default set instead -- which is wider, contains exactly what the block
+ * asked to exclude, and produces no error. */
+static bs_status bs_block_trust_load(const bs_token *t, const bs_tables *tab,
+                                     size_t block_index, bs_span block,
+                                     bs_origin *out) {
+  bs_origin trust = BS_ORIGIN_NONE;
+  bs_status st = bs_trust_load(t, tab, block_index, block, BS_F_BLOCK_SCOPE,
+                               BS_ORIGIN_ONE(0U), &trust);
+  if (st != BS_OK) {
+    return st;
   }
   *out = trust;
   return BS_OK;
@@ -787,7 +816,8 @@ static bs_status bs_trust_load(const bs_token *t, const bs_tables *tab,
 static bs_status bs_rule_load(bs_world *w, bs_symtab *syms,
                               const bs_symbols *from, const bs_token *t,
                               const bs_tables *tab, size_t block_index,
-                              bs_span rule, bs_rule *out) {
+                              bs_origin block_trust, bs_span rule,
+                              bs_rule *out) {
   bs_cursor c;
   bs_pb_field f;
   size_t body_count = 0;
@@ -880,7 +910,8 @@ static bs_status bs_rule_load(bs_world *w, bs_symtab *syms,
   }
 
   out->block = (uint32_t)block_index;
-  return bs_trust_load(t, tab, block_index, rule, BS_F_RULE_SCOPE, &out->trust);
+  return bs_trust_load(t, tab, block_index, rule, BS_F_RULE_SCOPE, block_trust,
+                       &out->trust);
 }
 
 /* Load every rule and check a block states. */
@@ -890,6 +921,7 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
                                      size_t block_index) {
   bs_cursor c;
   bs_pb_field f;
+  bs_origin block_trust = BS_ORIGIN_NONE;
   bs_status st;
 
   if (w == NULL || syms == NULL) {
@@ -897,6 +929,12 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
   }
   if (block_index >= (size_t)BS_MAX_BLOCKS) {
     return BS_ERR_LIMIT;
+  }
+
+  /* What this block trusts, before any rule states its own preference. */
+  st = bs_block_trust_load(t, tab, block_index, block, &block_trust);
+  if (st != BS_OK) {
+    return st;
   }
 
   c = bs_cursor_make(block);
@@ -910,7 +948,7 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
     if (w->rule_count >= w->rule_cap) {
       return BS_ERR_NOMEM;
     }
-    st = bs_rule_load(w, syms, from, t, tab, block_index, f.bytes,
+    st = bs_rule_load(w, syms, from, t, tab, block_index, block_trust, f.bytes,
                       &w->rules[w->rule_count]);
     if (st != BS_OK) {
       return st;
@@ -978,8 +1016,8 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
       if (w->rule_count >= w->rule_cap) {
         return BS_ERR_NOMEM;
       }
-      st = bs_rule_load(w, syms, from, t, tab, block_index, g.bytes,
-                        &w->rules[w->rule_count]);
+      st = bs_rule_load(w, syms, from, t, tab, block_index, block_trust,
+                        g.bytes, &w->rules[w->rule_count]);
       if (st != BS_OK) {
         return st;
       }

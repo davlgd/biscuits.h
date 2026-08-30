@@ -245,6 +245,44 @@ static void test_fact_printing(void) {
   CHECK(bs_fact_print(&W, &TAB, span_of(&fact)) == BS_ERR_MALFORMED);
 }
 
+/* A printer that runs out of room says so.
+ *
+ * Reporting BS_OK with truncated output hands the caller a shorter string
+ * that still reads as Datalog: `right("fil` is not an error, it is a
+ * different fact. The writer's overflow flag is sticky, so every public
+ * printer checks it before returning. */
+static void test_truncation_is_reported(void) {
+  static const size_t SIZES[] = {0U, 1U, 5U, 9U, 13U};
+  buf pred;
+  buf fact;
+  size_t i;
+
+  pred.n = 0;
+  put_tag(&pred, BS_F_PREDICATE_NAME, BS_PB_VARINT);
+  put_varint(&pred, 4U);
+  put_term_string(&pred, BS_F_PREDICATE_TERMS, 1024U);
+  fact.n = 0;
+  put_bytes(&fact, BS_F_FACT_PREDICATE, pred.b, pred.n);
+
+  for (i = 0; i < sizeof SIZES / sizeof SIZES[0]; i++) {
+    bs_writer w;
+    char small[16];
+    REQUIRE(bs_writer_init(&w, small, SIZES[i]) == BS_OK);
+    CHECK(bs_fact_print(&w, &TAB, span_of(&fact)) == BS_ERR_NOMEM);
+    REQUIRE(bs_writer_init(&w, small, SIZES[i]) == BS_OK);
+    CHECK(bs_predicate_print(&w, &TAB, span_of(&pred)) == BS_ERR_NOMEM);
+  }
+
+  /* `right("file1")` is fourteen bytes; a buffer of exactly that fits. */
+  {
+    bs_writer w;
+    char exact[14];
+    REQUIRE(bs_writer_init(&w, exact, sizeof exact) == BS_OK);
+    CHECK(bs_fact_print(&w, &TAB, span_of(&fact)) == BS_OK);
+    CHECK(bs_writer_len(&w) == sizeof exact);
+  }
+}
+
 /* --------------------------------------------------------------------------
  * Scopes
  * ----------------------------------------------------------------------- */
@@ -887,6 +925,7 @@ int main(void) {
   test_tables_reject_bad_arguments();
   test_predicate_printing();
   test_fact_printing();
+  test_truncation_is_reported();
   test_scope_printing();
   test_world_reserves_everything_up_front();
   test_origin_bitset();

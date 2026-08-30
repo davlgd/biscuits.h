@@ -96,10 +96,27 @@ the only reason these are paragraphs rather than incidents.
 
 ### 3. Bounded loops
 
-Every loop has a static bound or a caller-supplied one. Datalog evaluation is
-governed by the run limits the specification already defines (`maxFacts`,
-`maxIterations`, `maxTime`), so this rule costs nothing: the spec demands it
-anyway.
+Every loop has a static bound or a caller-supplied one.
+
+Datalog evaluation is governed by the run limits the specification defines,
+and one of them needed replacing rather than adopting. `maxFacts` and
+`maxIterations` map onto `bs_limits.max_facts` and `max_iterations` directly.
+`maxTime` does not: bounding time needs a clock, and a library whose fifth
+invariant is "memcpy, memcmp, memset" does not link one.
+
+An earlier version of this document cited `maxTime` anyway, which made the
+bound a claim with nothing behind it — and the gap was real, not cosmetic.
+`max_iterations` counts how many times the fixpoint goes round; it says
+nothing about the work inside one round. Matching a body of N predicates
+against F facts is F^N candidate combinations, and a token's own blocks choose
+both N and F. A single appended rule could therefore buy an evaluation that
+terminates in theory and not in practice, with every configured limit
+respected.
+
+`bs_limits.max_steps` bounds that work directly: every candidate the join
+examines spends one step, and exhausting the budget is `BS_ERR_LIMIT` rather
+than a hang. It is deterministic where a time bound is not, and identical on
+every machine. The default is ten million.
 
 ### 4. Pointer arithmetic is confined
 

@@ -12,6 +12,7 @@
  */
 
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 
 #define BS_ASSERT(cond) assert(cond)
@@ -331,6 +332,55 @@ static void test_an_unregistered_call_is_refused(void) {
   CHECK(bs_authorize(&W, &SYMS, &A, 0U, &V) == BS_ERR_UNSUPPORTED);
 }
 
+/* A join is bounded by work, not only by fixpoint rounds.
+ *
+ * `max_iterations` counts how many times the fixpoint goes round and says
+ * nothing about the work inside one round: matching N body predicates against
+ * F facts is F^N candidates, and a token's own blocks choose both. */
+static void test_the_join_is_bounded_by_work(void) {
+  bs_limits lim = bs_limits_default();
+  char src[4096];
+  size_t n = 0;
+  size_t i;
+  bs_status st;
+
+  /* Forty facts and a body of three predicates over them: 64 000 candidate
+   * combinations, from four lines of Datalog. */
+  for (i = 0; i < 40U; i++) {
+    n += (size_t)snprintf(src + n, sizeof src - n, "a(%u);\n", (unsigned)i);
+  }
+  n += (size_t)snprintf(src + n, sizeof src - n,
+                        "h($x, $y, $z) <- a($x), a($y), a($z), $x > 100;\n"
+                        "allow if true;\n");
+
+  lim.max_terms = 4096U;
+  lim.max_facts = 256U;
+  lim.max_steps = 1000U;
+
+  REQUIRE(bs_arena_init(&A, arena_buf, sizeof arena_buf) == BS_OK);
+  TAB.symbols.entries = NULL;
+  TAB.symbols.count = 0U;
+  TAB.public_keys = NULL;
+  TAB.public_key_count = 0U;
+  REQUIRE(bs_symtab_init(&SYMS, &A, &TAB.symbols, 64U) == BS_OK);
+  REQUIRE(bs_world_init(&W, &A, &TAB, 1U, &lim) == BS_OK);
+  REQUIRE(bs_world_parse(&W, &SYMS, &A, bs_span_make(src, n),
+                         (size_t)BS_MAX_BLOCKS, NULL, NULL) == BS_OK);
+  /* Refused, and refused as a limit rather than by hanging. */
+  CHECK(bs_authorize(&W, &SYMS, &A, 0U, &V) == BS_ERR_LIMIT);
+
+  /* With a budget that covers it, the same source decides normally. */
+  lim.max_steps = 1000000U;
+  REQUIRE(bs_arena_init(&A, arena_buf, sizeof arena_buf) == BS_OK);
+  REQUIRE(bs_symtab_init(&SYMS, &A, &TAB.symbols, 64U) == BS_OK);
+  REQUIRE(bs_world_init(&W, &A, &TAB, 1U, &lim) == BS_OK);
+  REQUIRE(bs_world_parse(&W, &SYMS, &A, bs_span_make(src, n),
+                         (size_t)BS_MAX_BLOCKS, NULL, NULL) == BS_OK);
+  st = bs_authorize(&W, &SYMS, &A, 0U, &V);
+  CHECK(st == BS_OK);
+  CHECK(V.kind == (uint8_t)BS_VERDICT_ALLOW);
+}
+
 int main(void) {
   test_a_matching_allow_authorizes();
   test_the_first_matching_policy_decides();
@@ -347,5 +397,6 @@ int main(void) {
   test_registering_externs_checks_its_arguments();
   test_a_failing_external_call_fails_its_expression();
   test_an_unregistered_call_is_refused();
+  test_the_join_is_bounded_by_work();
   return bs_test_finish();
 }

@@ -122,7 +122,11 @@ BS_API bs_status bs_rule_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
     return st;
   }
   BS_PUT_LIT(w, " <- ");
-  return bs_rule_body_print(w, a, tab, rule);
+  st = bs_rule_body_print(w, a, tab, rule);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* `check if q`, `check all q`, or `reject if q`, with several queries joined
@@ -183,7 +187,7 @@ BS_API bs_status bs_check_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
   if (emitted == 0) {
     return BS_ERR_MALFORMED; /* a check with no query cannot mean anything */
   }
-  return BS_OK;
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* Render a whole block as Datalog source: facts, then rules, then checks,
@@ -203,22 +207,37 @@ BS_API bs_status bs_block_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
     return BS_ERR_ARGUMENT;
   }
 
-  /* A block-level scope would apply to everything in the block. No sample in
-   * the specification's suite carries one, so its printed form cannot be
-   * confirmed against anything -- and inventing a syntax that later turns out
-   * to differ would be worse than refusing. Refused explicitly rather than
-   * ignored: a block whose trust boundary this build cannot render must not
-   * be reported as one it rendered. */
+  /* A block-level scope applies to everything in the block, and the grammar
+   * puts it first: `<block> ::= (<origin_clause> ";" <sp>?)? ...`. No sample
+   * in the specification's suite carries one, so this rendering is read from
+   * the grammar rather than confirmed against the reference -- but the origin
+   * elements themselves are the ones the rule-level annotation already emits,
+   * which the conformance suite does check. */
   {
     bs_cursor c = bs_cursor_make(block);
     bs_pb_field f;
+    int emitted = 0;
     while (!bs_cursor_done(&c)) {
+      bs_status st;
       if (!bs_pb_next(&c, &f)) {
         return BS_ERR_MALFORMED;
       }
-      if (f.number == BS_F_BLOCK_SCOPE && f.wire == BS_PB_BYTES) {
-        return BS_ERR_UNSUPPORTED;
+      if (f.number != BS_F_BLOCK_SCOPE || f.wire != BS_PB_BYTES) {
+        continue;
       }
+      if (emitted) {
+        BS_PUT_LIT(w, ", ");
+      } else {
+        BS_PUT_LIT(w, "trusting ");
+        emitted = 1;
+      }
+      st = bs_scope_print(w, tab, f.bytes);
+      if (st != BS_OK) {
+        return st;
+      }
+    }
+    if (emitted) {
+      BS_PUT_LIT(w, ";\n");
     }
   }
 

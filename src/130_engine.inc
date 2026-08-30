@@ -184,18 +184,22 @@ static bs_status bs_solver_init(bs_solver *s, const bs_world *w,
 }
 
 /* Advance to the next combination matching the body. `*found` is 0 when
- * there are none left; the bindings are then meaningless. */
-static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
-                           int *found) {
+ * there are none left; the bindings are then meaningless.
+ *
+ * Every candidate examined spends one step from the world's budget. Without
+ * that, the only bound on this walk is base_facts raised to the number of
+ * body predicates, and both are the token's to choose. */
+static bs_status bs_solver_next(bs_world *w, const bs_rule *r, bs_solver *s,
+                                int *found) {
   *found = 0;
   if (s->done) {
-    return;
+    return BS_OK;
   }
   if (s->started) {
     /* Resume by undoing the last answer's final choice. */
     if (s->level == 0U) {
       s->done = 1;
-      return;
+      return BS_OK;
     }
     s->level--;
     s->bind_count = s->frames[s->level].bind_mark;
@@ -210,7 +214,7 @@ static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
 
     if (s->level == r->body_count) {
       *found = 1;
-      return;
+      return BS_OK;
     }
 
     p = &w->preds[r->body_at + s->level];
@@ -220,6 +224,12 @@ static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
     while (s->frames[s->level].fact < s->base_facts) {
       const bs_fact *f = &w->facts[s->frames[s->level].fact];
       size_t mark = s->bind_count;
+
+      if (w->steps == 0U) {
+        s->done = 1;
+        return BS_ERR_LIMIT;
+      }
+      w->steps--;
 
       /* "Only facts whose origin is a subset of these trusted origins are
        * matched." A subset, not an overlap. */
@@ -242,7 +252,7 @@ static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
     if (!matched) {
       if (s->level == 0U) {
         s->done = 1;
-        return;
+        return BS_OK;
       }
       s->level--;
       s->bind_count = s->frames[s->level].bind_mark;
@@ -306,7 +316,10 @@ static bs_status bs_rule_apply(bs_world *w, bs_symtab *syms, bs_arena *a,
     size_t i;
     int seen = 0;
 
-    bs_solver_next(w, r, sv, &found);
+    st = bs_solver_next(w, r, sv, &found);
+    if (st != BS_OK) {
+      return st;
+    }
     if (!found) {
       return BS_OK;
     }

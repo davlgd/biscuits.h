@@ -609,6 +609,7 @@ typedef struct bs_world {
   size_t policy_cap;
 
   const bs_tables *tables; /* symbols and public keys, borrowed */
+  size_t steps;            /* join candidates left before BS_ERR_LIMIT */
   /* External calls the host registered, borrowed. Empty by default: an
    * `extern::` in a token then fails the expression rather than resolving to
    * something this library made up. */
@@ -674,6 +675,22 @@ typedef struct bs_limits {
   size_t max_policies;
   size_t
       max_iterations; /* fixpoint rounds, per the specification's run limits */
+  /* Candidate facts the join may examine across a whole evaluation.
+   *
+   * `max_iterations` bounds how many times the fixpoint goes round; it says
+   * nothing about the work inside one round. Matching a body of N predicates
+   * against F facts is F^N candidates, and both N and F are chosen by whoever
+   * wrote the token -- so a single appended rule can buy an evaluation that
+   * terminates in theory and never in practice. The specification's own
+   * answer is `maxTime`, which needs a clock this library does not link, so
+   * the bound is on work instead: it is deterministic, which a time bound is
+   * not, and it is the same on every machine.
+   *
+   * The default is ten million, which is a fraction of a second and well
+   * above anything the specification's own samples need. Raise it if your
+   * authorizer legitimately joins large fact sets; lowering it is the knob
+   * for a caller that would rather refuse an expensive token than serve it. */
+  size_t max_steps;
 } bs_limits;
 
 /* Defaults sized for the tokens the specification's own suite contains, with

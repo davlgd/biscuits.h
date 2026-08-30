@@ -100,6 +100,16 @@ static void test_precedence(void) {
   TRUE_EXPR("2 * 3 + 1 === 7");
   TRUE_EXPR("(1 + 2) * 3 === 9");
   TRUE_EXPR("10 - 2 - 3 === 5");
+  /* The grammar makes the space optional, so a `-` with a digit against it is
+   * subtraction where an operand has just been read, and the sign of a
+   * literal where one has not. Nothing about the character says which. */
+  TRUE_EXPR("3-2 === 1");
+  TRUE_EXPR("3-2-1 === 0");
+  TRUE_EXPR("(3)-2 === 1");
+  TRUE_EXPR("[9].get(0)-2 === 7");
+  TRUE_EXPR("-3 + 2 === -1");
+  TRUE_EXPR("[-1, -2].get(1) === -2");
+  TRUE_EXPR("{-1: \"a\"}.get(-1) === \"a\"");
   TRUE_EXPR("100 / 10 / 2 === 5");
 
   /* Not C's order: `&` binds tighter than `|`, which binds tighter than `^`.
@@ -152,6 +162,16 @@ static void test_closures(void) {
 static void test_literals(void) {
   TRUE_EXPR("\"file.txt\".matches(\"^file[.]txt$\")");
   TRUE_EXPR("2020-12-21T09:23:12Z < 2021-01-01T00:00:00Z");
+  /* A date that does not exist is refused rather than normalised into a
+   * different instant: the 31st of February would otherwise be the 2nd of
+   * March, which is a second spelling nobody wrote on purpose. */
+  CHECK(refuses("check if 2020-02-31T00:00:00Z === 2020-02-31T00:00:00Z"));
+  CHECK(refuses("check if 2021-02-29T00:00:00Z === 2021-02-29T00:00:00Z"));
+  CHECK(refuses("check if 2020-04-31T00:00:00Z === 2020-04-31T00:00:00Z"));
+  CHECK(refuses("check if 2020-00-01T00:00:00Z === 2020-00-01T00:00:00Z"));
+  TRUE_EXPR("2020-02-29T00:00:00Z < 2020-03-01T00:00:00Z"); /* a leap year */
+  TRUE_EXPR(
+      "2000-02-29T00:00:00Z < 2000-03-01T00:00:00Z"); /* and a leap century */
   TRUE_EXPR("hex:0102 === hex:0102");
   TRUE_EXPR("hex:01 !== hex:02");
   TRUE_EXPR("null == null");
@@ -175,6 +195,15 @@ static void test_containers(void) {
   TRUE_EXPR("[1, [2, 3]].length() === 2");
   TRUE_EXPR("[1, [2, 3]].get(1).length() === 2");
   TRUE_EXPR("{\"a\": [1, 2]}.get(\"a\").get(0) === 1");
+}
+
+/* A negative number in an argument list is a literal, not a subtraction of
+ * something that is not there. */
+static void test_negative_literals_in_arguments(void) {
+  REQUIRE(parse("f(-1, 2);\ng(-1);") == BS_OK);
+  CHECK(W.fact_count == 2U);
+  CHECK(W.terms[W.facts[0].pred.at].kind == (uint8_t)BS_T_INTEGER);
+  CHECK(W.terms[W.facts[0].pred.at].as.integer == -1);
 }
 
 static void test_statements(void) {
@@ -228,8 +257,22 @@ static void test_trust_annotations(void) {
   REQUIRE(parse("check if a($x)") == BS_OK);
   CHECK((W.rules[0].trust & BS_ORIGIN_ONE(0U)) != BS_ORIGIN_NONE);
 
+  /* `previous` is ignored in the authorizer -- and the annotation still
+   * replaces the default, so it leaves the authorizer trusting only itself.
+   * Reading it as "every block there is" instead would invert it: an
+   * annotation that narrows to nothing would widen to every block an
+   * attacker appended. */
   REQUIRE(parse("check if a($x) trusting previous") == BS_OK);
-  CHECK((W.rules[0].trust & BS_ORIGIN_ONE(1U)) != BS_ORIGIN_NONE);
+  CHECK(W.rules[0].trust == BS_ORIGIN_AUTHORIZER);
+
+  /* In a block it does mean every block up to and including that one. */
+  REQUIRE(reset_world());
+  REQUIRE(bs_world_parse(&W, &SYMS, &A,
+                         bs_span_make("check if a($x) trusting previous", 32U),
+                         2U, NULL, NULL) == BS_OK);
+  CHECK(W.rules[0].trust == (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) |
+                             BS_ORIGIN_ONE(1U) | BS_ORIGIN_ONE(2U)));
+  CHECK((W.rules[0].trust & BS_ORIGIN_ONE(3U)) == BS_ORIGIN_NONE);
 
   /* A key nobody signed with adds nothing, which is the honest reading of
    * "the blocks this key signed" when there are none -- not an error. */
@@ -241,6 +284,37 @@ static void test_trust_annotations(void) {
    * beyond the authorizer itself. Keeping the authority here is the
    * difference between a policy that denies and one that grants. */
   CHECK(W.rules[0].trust == BS_ORIGIN_AUTHORIZER);
+}
+
+/* A block may open with a trust annotation covering everything in it, and a
+ * statement of its own still overrides it. Ignoring the clause would hand
+ * those statements the default set instead -- wider, and containing exactly
+ * what the block asked to exclude. */
+static void test_block_level_trust(void) {
+  REQUIRE(reset_world());
+  REQUIRE(bs_world_parse(&W, &SYMS, &A,
+                         bs_span_make("trusting previous;\n"
+                                      "check if a($x);\n"
+                                      "check if b($x) trusting authority;",
+                                      69U),
+                         2U, NULL, NULL) == BS_OK);
+  /* Inherited: the authorizer, this block, and every block before it. */
+  CHECK(W.rules[W.checks[0].query_at].trust ==
+        (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(1U) |
+         BS_ORIGIN_ONE(2U)));
+  /* Overridden: the authorizer, this block, and the authority only. */
+  CHECK(W.rules[W.checks[1].query_at].trust ==
+        (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(2U)));
+
+  /* Without the clause, the default still includes the authority. */
+  REQUIRE(reset_world());
+  REQUIRE(bs_world_parse(&W, &SYMS, &A, bs_span_make("check if a($x);", 15U),
+                         2U, NULL, NULL) == BS_OK);
+  CHECK(W.rules[0].trust ==
+        (BS_ORIGIN_AUTHORIZER | BS_ORIGIN_ONE(0U) | BS_ORIGIN_ONE(2U)));
+
+  /* The authorizer is not a block and has no such clause. */
+  CHECK(refuses("trusting authority;\ncheck if a($x);"));
 }
 
 static void test_refusals(void) {
@@ -283,11 +357,13 @@ int main(void) {
   test_closures();
   test_literals();
   test_containers();
+  test_negative_literals_in_arguments();
   test_statements();
   test_alternatives();
   test_rule_body();
   test_body_may_open_with_an_expression();
   test_trust_annotations();
+  test_block_level_trust();
   test_refusals();
   test_depth_is_bounded();
   return bs_test_finish();

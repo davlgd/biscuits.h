@@ -102,10 +102,15 @@ INDIRECT_CALL_SITES = {
     "bs_call_extern",  # reaches a function the host registered
 }
 
-# At -O0 a direct call names its callee with `@`; an indirect one calls
-# through a register. Lines carrying an `@` are excluded, which is what tells
-# the two apart.
-INDIRECT_CALL_RE = re.compile(r"\b(?:call|invoke)\b[^(\n]*?%[\w.]+\s*\(")
+# A direct call names its callee `@name(`; an indirect one calls through a
+# register, `%reg(`. Matching on the register form alone is what tells them
+# apart. An earlier version of this check also required the line to contain no
+# `@`, which meant an indirect call that merely mentioned a global -- a string
+# literal, a static table, any function address passed as an argument -- was
+# invisible, and a second unpinned indirect call would have passed silently.
+# Register names carry no `@`, so the form itself is the discriminator and
+# nothing else on the line matters.
+INDIRECT_CALL_RE = re.compile(r"\b(?:call|invoke)\b[^\n]*?%[\w.$]+\s*\(")
 
 
 def build_object(cc: str, header: pathlib.Path, tmp: pathlib.Path) -> pathlib.Path:
@@ -175,7 +180,7 @@ def check_recursion(cc: str, header: pathlib.Path, tmp: pathlib.Path) -> list:
             continue
         if current is None:
             continue
-        if "@" not in line and INDIRECT_CALL_RE.search(line):
+        if INDIRECT_CALL_RE.search(line):
             indirect.add(current)
         for callee in CALL_RE.findall(line):
             if not callee.startswith("llvm."):

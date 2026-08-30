@@ -18,6 +18,7 @@ BS_API bs_limits bs_limits_default(void) {
   l.max_checks = 256U;
   l.max_policies = 64U;
   l.max_iterations = 100U;
+  l.max_steps = 10000000U;
   return l;
 }
 
@@ -80,6 +81,7 @@ BS_API bs_status bs_world_init(bs_world *w, bs_arena *a, const bs_tables *tab,
   w->rule_cap = l.max_rules;
   w->check_cap = l.max_checks;
   w->policy_cap = l.max_policies;
+  w->steps = (l.max_steps == 0U) ? bs_limits_default().max_steps : l.max_steps;
   return BS_OK;
 }
 

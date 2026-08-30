@@ -26,7 +26,10 @@ static bs_status bs_query_any(bs_world *w, bs_symtab *syms, bs_arena *a,
     int found = 0;
     int keep = 0;
 
-    bs_solver_next(w, r, sv, &found);
+    st = bs_solver_next(w, r, sv, &found);
+    if (st != BS_OK) {
+      return st;
+    }
     if (!found) {
       return BS_OK;
     }
@@ -61,7 +64,10 @@ static bs_status bs_query_all(bs_world *w, bs_symtab *syms, bs_arena *a,
     int found = 0;
     int keep = 0;
 
-    bs_solver_next(w, r, sv, &found);
+    st = bs_solver_next(w, r, sv, &found);
+    if (st != BS_OK) {
+      return st;
+    }
     if (!found) {
       *yes = any;
       return BS_OK;

@@ -814,6 +814,7 @@ typedef struct bs_world {
   size_t policy_cap;
 
   const bs_tables *tables; /* symbols and public keys, borrowed */
+  size_t steps;            /* join candidates left before BS_ERR_LIMIT */
   /* External calls the host registered, borrowed. Empty by default: an
    * `extern::` in a token then fails the expression rather than resolving to
    * something this library made up. */
@@ -879,6 +880,22 @@ typedef struct bs_limits {
   size_t max_policies;
   size_t
       max_iterations; /* fixpoint rounds, per the specification's run limits */
+  /* Candidate facts the join may examine across a whole evaluation.
+   *
+   * `max_iterations` bounds how many times the fixpoint goes round; it says
+   * nothing about the work inside one round. Matching a body of N predicates
+   * against F facts is F^N candidates, and both N and F are chosen by whoever
+   * wrote the token -- so a single appended rule can buy an evaluation that
+   * terminates in theory and never in practice. The specification's own
+   * answer is `maxTime`, which needs a clock this library does not link, so
+   * the bound is on work instead: it is deterministic, which a time bound is
+   * not, and it is the same on every machine.
+   *
+   * The default is ten million, which is a fraction of a second and well
+   * above anything the specification's own samples need. Raise it if your
+   * authorizer legitimately joins large fact sets; lowering it is the knob
+   * for a caller that would rather refuse an expensive token than serve it. */
+  size_t max_steps;
 } bs_limits;
 
 /* Defaults sized for the tokens the specification's own suite contains, with
@@ -3223,8 +3240,15 @@ static void bs_put_byte(bs_writer *w, uint8_t b) {
  * strlen, which puts a str* function into the shipped object and breaks
  * invariant 5. tools/check_invariants.py caught exactly that. sizeof cannot
  * be rewritten into anything. */
+/* Append a string literal, whose length the compiler already knows.
+ *
+ * The `"" lit` is a guard, not decoration. For a literal it concatenates to
+ * the same literal and costs nothing; for anything else -- a `const char *`,
+ * a ternary between two literals -- it is a syntax error. Without it `sizeof`
+ * silently measures a pointer, and the writer emits seven or eight bytes of
+ * whatever happened to be there. That has gone wrong twice. */
 #define BS_PUT_LIT(w, lit)                                                     \
-  bs_put_span((w), bs_span_make((lit), sizeof(lit) - 1U))
+  bs_put_span((w), bs_span_make("" lit, sizeof("" lit) - 1U))
 
 /* Signed decimal, INT64_MIN included.
  *
@@ -4052,7 +4076,13 @@ BS_API bs_status bs_scope_print(bs_writer *w, const bs_tables *tab,
       (uint64_t)key >= (uint64_t)tab->public_key_count) {
     return BS_ERR_MALFORMED;
   }
-  return bs_print_public_key(w, &tab->public_keys[(size_t)key]);
+  {
+    bs_status st = bs_print_public_key(w, &tab->public_keys[(size_t)key]);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* `name(term, term, ...)`, the shape shared by facts, rule heads and rule
@@ -4108,7 +4138,7 @@ BS_API bs_status bs_predicate_print(bs_writer *w, const bs_tables *tab,
   }
 
   bs_put_byte(w, (uint8_t)')');
-  return BS_OK;
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* A Fact is a Predicate in a one-field wrapper. */
@@ -4137,7 +4167,13 @@ BS_API bs_status bs_fact_print(bs_writer *w, const bs_tables *tab,
   if (found != 1) {
     return BS_ERR_MALFORMED;
   }
-  return bs_predicate_print(w, tab, pred);
+  {
+    bs_status st = bs_predicate_print(w, tab, pred);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* ===========================================================================
@@ -4794,7 +4830,11 @@ BS_API bs_status bs_rule_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
     return st;
   }
   BS_PUT_LIT(w, " <- ");
-  return bs_rule_body_print(w, a, tab, rule);
+  st = bs_rule_body_print(w, a, tab, rule);
+  if (st != BS_OK) {
+    return st;
+  }
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* `check if q`, `check all q`, or `reject if q`, with several queries joined
@@ -4855,7 +4895,7 @@ BS_API bs_status bs_check_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
   if (emitted == 0) {
     return BS_ERR_MALFORMED; /* a check with no query cannot mean anything */
   }
-  return BS_OK;
+  return bs_writer_overflow(w) ? BS_ERR_NOMEM : BS_OK;
 }
 
 /* Render a whole block as Datalog source: facts, then rules, then checks,
@@ -4875,22 +4915,37 @@ BS_API bs_status bs_block_print(bs_writer *w, bs_arena *a, const bs_tables *tab,
     return BS_ERR_ARGUMENT;
   }
 
-  /* A block-level scope would apply to everything in the block. No sample in
-   * the specification's suite carries one, so its printed form cannot be
-   * confirmed against anything -- and inventing a syntax that later turns out
-   * to differ would be worse than refusing. Refused explicitly rather than
-   * ignored: a block whose trust boundary this build cannot render must not
-   * be reported as one it rendered. */
+  /* A block-level scope applies to everything in the block, and the grammar
+   * puts it first: `<block> ::= (<origin_clause> ";" <sp>?)? ...`. No sample
+   * in the specification's suite carries one, so this rendering is read from
+   * the grammar rather than confirmed against the reference -- but the origin
+   * elements themselves are the ones the rule-level annotation already emits,
+   * which the conformance suite does check. */
   {
     bs_cursor c = bs_cursor_make(block);
     bs_pb_field f;
+    int emitted = 0;
     while (!bs_cursor_done(&c)) {
+      bs_status st;
       if (!bs_pb_next(&c, &f)) {
         return BS_ERR_MALFORMED;
       }
-      if (f.number == BS_F_BLOCK_SCOPE && f.wire == BS_PB_BYTES) {
-        return BS_ERR_UNSUPPORTED;
+      if (f.number != BS_F_BLOCK_SCOPE || f.wire != BS_PB_BYTES) {
+        continue;
       }
+      if (emitted) {
+        BS_PUT_LIT(w, ", ");
+      } else {
+        BS_PUT_LIT(w, "trusting ");
+        emitted = 1;
+      }
+      st = bs_scope_print(w, tab, f.bytes);
+      if (st != BS_OK) {
+        return st;
+      }
+    }
+    if (emitted) {
+      BS_PUT_LIT(w, ";\n");
     }
   }
 
@@ -4946,6 +5001,7 @@ BS_API bs_limits bs_limits_default(void) {
   l.max_checks = 256U;
   l.max_policies = 64U;
   l.max_iterations = 100U;
+  l.max_steps = 10000000U;
   return l;
 }
 
@@ -5008,6 +5064,7 @@ BS_API bs_status bs_world_init(bs_world *w, bs_arena *a, const bs_tables *tab,
   w->rule_cap = l.max_rules;
   w->check_cap = l.max_checks;
   w->policy_cap = l.max_policies;
+  w->steps = (l.max_steps == 0U) ? bs_limits_default().max_steps : l.max_steps;
   return BS_OK;
 }
 
@@ -5946,9 +6003,17 @@ static bs_status bs_scope_resolve(const bs_token *t, const bs_tables *tab,
 
 /* The trust set of a rule: the always-trusted pair, plus whatever its scope
  * annotations add, or the authority block when there are none. */
+/* The trust set of a rule, a check, or a block itself.
+ *
+ * `fallback` is what applies when the message carries no annotation of its
+ * own. For a rule that is the block's set; for a block it is the authority,
+ * which is the specification's default. A rule-level annotation takes
+ * precedence over the block's, and both replace the default rather than
+ * adding to it -- only the current block and the authorizer are always
+ * trusted. */
 static bs_status bs_trust_load(const bs_token *t, const bs_tables *tab,
                                size_t block_index, bs_span msg, uint32_t field,
-                               bs_origin *out) {
+                               bs_origin fallback, bs_origin *out) {
   bs_cursor c = bs_cursor_make(msg);
   bs_pb_field f;
   int annotated = 0;
@@ -5972,7 +6037,28 @@ static bs_status bs_trust_load(const bs_token *t, const bs_tables *tab,
     annotated = 1;
   }
   if (!annotated) {
-    trust |= BS_ORIGIN_ONE(0U);
+    trust |= fallback;
+  }
+  *out = trust;
+  return BS_OK;
+}
+
+/* What a block trusts by default: its own scope annotations if it carries
+ * any, and the authority block if it does not.
+ *
+ * Reading this field is not optional. A block that says `trusting ed25519/k`
+ * has deliberately narrowed what its own rules and checks may see, usually to
+ * exclude the authority. Ignoring the annotation hands those rules the
+ * default set instead -- which is wider, contains exactly what the block
+ * asked to exclude, and produces no error. */
+static bs_status bs_block_trust_load(const bs_token *t, const bs_tables *tab,
+                                     size_t block_index, bs_span block,
+                                     bs_origin *out) {
+  bs_origin trust = BS_ORIGIN_NONE;
+  bs_status st = bs_trust_load(t, tab, block_index, block, BS_F_BLOCK_SCOPE,
+                               BS_ORIGIN_ONE(0U), &trust);
+  if (st != BS_OK) {
+    return st;
   }
   *out = trust;
   return BS_OK;
@@ -5981,7 +6067,8 @@ static bs_status bs_trust_load(const bs_token *t, const bs_tables *tab,
 static bs_status bs_rule_load(bs_world *w, bs_symtab *syms,
                               const bs_symbols *from, const bs_token *t,
                               const bs_tables *tab, size_t block_index,
-                              bs_span rule, bs_rule *out) {
+                              bs_origin block_trust, bs_span rule,
+                              bs_rule *out) {
   bs_cursor c;
   bs_pb_field f;
   size_t body_count = 0;
@@ -6074,7 +6161,8 @@ static bs_status bs_rule_load(bs_world *w, bs_symtab *syms,
   }
 
   out->block = (uint32_t)block_index;
-  return bs_trust_load(t, tab, block_index, rule, BS_F_RULE_SCOPE, &out->trust);
+  return bs_trust_load(t, tab, block_index, rule, BS_F_RULE_SCOPE, block_trust,
+                       &out->trust);
 }
 
 /* Load every rule and check a block states. */
@@ -6084,6 +6172,7 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
                                      size_t block_index) {
   bs_cursor c;
   bs_pb_field f;
+  bs_origin block_trust = BS_ORIGIN_NONE;
   bs_status st;
 
   if (w == NULL || syms == NULL) {
@@ -6091,6 +6180,12 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
   }
   if (block_index >= (size_t)BS_MAX_BLOCKS) {
     return BS_ERR_LIMIT;
+  }
+
+  /* What this block trusts, before any rule states its own preference. */
+  st = bs_block_trust_load(t, tab, block_index, block, &block_trust);
+  if (st != BS_OK) {
+    return st;
   }
 
   c = bs_cursor_make(block);
@@ -6104,7 +6199,7 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
     if (w->rule_count >= w->rule_cap) {
       return BS_ERR_NOMEM;
     }
-    st = bs_rule_load(w, syms, from, t, tab, block_index, f.bytes,
+    st = bs_rule_load(w, syms, from, t, tab, block_index, block_trust, f.bytes,
                       &w->rules[w->rule_count]);
     if (st != BS_OK) {
       return st;
@@ -6172,8 +6267,8 @@ BS_API bs_status bs_world_load_logic(bs_world *w, bs_symtab *syms,
       if (w->rule_count >= w->rule_cap) {
         return BS_ERR_NOMEM;
       }
-      st = bs_rule_load(w, syms, from, t, tab, block_index, g.bytes,
-                        &w->rules[w->rule_count]);
+      st = bs_rule_load(w, syms, from, t, tab, block_index, block_trust,
+                        g.bytes, &w->rules[w->rule_count]);
       if (st != BS_OK) {
         return st;
       }
@@ -8368,18 +8463,22 @@ static bs_status bs_solver_init(bs_solver *s, const bs_world *w,
 }
 
 /* Advance to the next combination matching the body. `*found` is 0 when
- * there are none left; the bindings are then meaningless. */
-static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
-                           int *found) {
+ * there are none left; the bindings are then meaningless.
+ *
+ * Every candidate examined spends one step from the world's budget. Without
+ * that, the only bound on this walk is base_facts raised to the number of
+ * body predicates, and both are the token's to choose. */
+static bs_status bs_solver_next(bs_world *w, const bs_rule *r, bs_solver *s,
+                                int *found) {
   *found = 0;
   if (s->done) {
-    return;
+    return BS_OK;
   }
   if (s->started) {
     /* Resume by undoing the last answer's final choice. */
     if (s->level == 0U) {
       s->done = 1;
-      return;
+      return BS_OK;
     }
     s->level--;
     s->bind_count = s->frames[s->level].bind_mark;
@@ -8394,7 +8493,7 @@ static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
 
     if (s->level == r->body_count) {
       *found = 1;
-      return;
+      return BS_OK;
     }
 
     p = &w->preds[r->body_at + s->level];
@@ -8404,6 +8503,12 @@ static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
     while (s->frames[s->level].fact < s->base_facts) {
       const bs_fact *f = &w->facts[s->frames[s->level].fact];
       size_t mark = s->bind_count;
+
+      if (w->steps == 0U) {
+        s->done = 1;
+        return BS_ERR_LIMIT;
+      }
+      w->steps--;
 
       /* "Only facts whose origin is a subset of these trusted origins are
        * matched." A subset, not an overlap. */
@@ -8426,7 +8531,7 @@ static void bs_solver_next(const bs_world *w, const bs_rule *r, bs_solver *s,
     if (!matched) {
       if (s->level == 0U) {
         s->done = 1;
-        return;
+        return BS_OK;
       }
       s->level--;
       s->bind_count = s->frames[s->level].bind_mark;
@@ -8490,7 +8595,10 @@ static bs_status bs_rule_apply(bs_world *w, bs_symtab *syms, bs_arena *a,
     size_t i;
     int seen = 0;
 
-    bs_solver_next(w, r, sv, &found);
+    st = bs_solver_next(w, r, sv, &found);
+    if (st != BS_OK) {
+      return st;
+    }
     if (!found) {
       return BS_OK;
     }
@@ -8662,6 +8770,12 @@ typedef struct bs_token_t {
 typedef struct bs_lexer {
   bs_span src;
   size_t pos;
+  /* Whether the token just consumed was an operand. `-` is the sign of a
+   * number literal or the subtraction operator, and nothing about the
+   * character says which: the grammar makes the space optional, so `3-2` is
+   * a subtraction while `f(-2)` is a negative literal. Only the parser knows
+   * which it is expecting, so it says. */
+  int after_operand;
 } bs_lexer;
 
 static int bs_is_space(uint8_t c) {
@@ -8778,9 +8892,26 @@ static bs_status bs_lex_date(const bs_lexer *l, size_t start, uint64_t *out,
     p++;
   }
 
-  if (part[1] < 1U || part[1] > 12U || part[2] < 1U || part[2] > 31U ||
-      part[3] > 23U || part[4] > 59U || part[5] > 60U) {
+  if (part[1] < 1U || part[1] > 12U || part[2] < 1U || part[3] > 23U ||
+      part[4] > 59U || part[5] > 60U) {
     return BS_ERR_MALFORMED;
+  }
+  {
+    /* Days per month, with February decided by the year. A flat 1..31 bound
+     * would accept the 31st of February, and the conversion below would then
+     * silently normalise it into a different instant rather than refusing --
+     * two spellings for one moment, one of which nobody wrote on purpose. */
+    static const uint64_t DAYS[12] = {
+        31U, 28U, 31U, 30U, 31U, 30U, 31U, 31U, 30U, 31U, 30U, 31U,
+    };
+    uint64_t limit = DAYS[part[1] - 1U];
+    if (part[1] == 2U && (part[0] % 4U) == 0U &&
+        ((part[0] % 100U) != 0U || (part[0] % 400U) == 0U)) {
+      limit = 29U;
+    }
+    if (part[2] > limit) {
+      return BS_ERR_MALFORMED;
+    }
   }
   /* Dates are unsigned seconds since the epoch, so nothing before 1970 is
    * expressible and refusing is the only honest answer. */
@@ -8862,10 +8993,11 @@ static bs_status bs_lex_next(bs_lexer *l, bs_token_t *t) {
     return BS_ERR_MALFORMED; /* unterminated */
   }
 
-  /* A number, or a date, which starts like one. */
+  /* A number, or a date, which starts like one. A leading `-` is part of the
+   * number only where an operand is expected; after one it is subtraction. */
   if (bs_is_digit(c) ||
-      (c == (uint8_t)'-' && bs_span_at(l->src, l->pos + 1U, &d) &&
-       bs_is_digit(d))) {
+      (c == (uint8_t)'-' && !l->after_operand &&
+       bs_span_at(l->src, l->pos + 1U, &d) && bs_is_digit(d))) {
     int negative = (c == (uint8_t)'-');
     size_t digits = 0;
     uint64_t value = 0;
@@ -9209,7 +9341,17 @@ typedef struct bs_parser {
   bs_origin default_trust; /* what a statement with no annotation trusts */
 } bs_parser;
 
+/* Fetch the next token. What follows is expected to be an operand, which is
+ * the common case: after an operator, a comma, an opening bracket. */
 static bs_status bs_p_advance(bs_parser *p) {
+  p->lex.after_operand = 0;
+  return bs_lex_next(&p->lex, &p->tok);
+}
+
+/* Fetch the next token knowing an operand has just been consumed, so a `-`
+ * ahead is subtraction rather than the sign of a literal. */
+static bs_status bs_p_advance_after_operand(bs_parser *p) {
+  p->lex.after_operand = 1;
   return bs_lex_next(&p->lex, &p->tok);
 }
 
@@ -9262,19 +9404,19 @@ static bs_status bs_p_scalar(bs_parser *p, bs_term *out) {
   case BS_TK_STRING:
     out->kind = (uint8_t)BS_T_STRING;
     st = bs_symtab_intern(p->syms, p->tok.text, &out->as.sym);
-    return (st == BS_OK) ? bs_p_advance(p) : st;
+    return (st == BS_OK) ? bs_p_advance_after_operand(p) : st;
   case BS_TK_VARIABLE:
     out->kind = (uint8_t)BS_T_VARIABLE;
     st = bs_symtab_intern(p->syms, p->tok.text, &out->as.sym);
-    return (st == BS_OK) ? bs_p_advance(p) : st;
+    return (st == BS_OK) ? bs_p_advance_after_operand(p) : st;
   case BS_TK_INTEGER:
     out->kind = (uint8_t)BS_T_INTEGER;
     out->as.integer = p->tok.integer;
-    return bs_p_advance(p);
+    return bs_p_advance_after_operand(p);
   case BS_TK_DATE:
     out->kind = (uint8_t)BS_T_DATE;
     out->as.date = p->tok.date;
-    return bs_p_advance(p);
+    return bs_p_advance_after_operand(p);
   case BS_TK_BYTES: {
     size_t n = p->tok.text.n / 2U;
     uint8_t *buf = (uint8_t *)bs_arena_alloc(p->arena, (n == 0U) ? 1U : n, 1U);
@@ -9286,22 +9428,22 @@ static bs_status bs_p_scalar(bs_parser *p, bs_term *out) {
     }
     out->kind = (uint8_t)BS_T_BYTES;
     out->as.bytes = bs_span_make(buf, n);
-    return bs_p_advance(p);
+    return bs_p_advance_after_operand(p);
   }
   case BS_TK_IDENT:
     if (BS_WORD(p, "true")) {
       out->kind = (uint8_t)BS_T_BOOL;
       out->as.boolean = 1;
-      return bs_p_advance(p);
+      return bs_p_advance_after_operand(p);
     }
     if (BS_WORD(p, "false")) {
       out->kind = (uint8_t)BS_T_BOOL;
       out->as.boolean = 0;
-      return bs_p_advance(p);
+      return bs_p_advance_after_operand(p);
     }
     if (BS_WORD(p, "null")) {
       out->kind = (uint8_t)BS_T_NULL;
-      return bs_p_advance(p);
+      return bs_p_advance_after_operand(p);
     }
     return BS_ERR_MALFORMED;
   default:
@@ -9374,7 +9516,7 @@ static bs_status bs_p_term(bs_parser *p, bs_term *out) {
       value.kind = kind;
       value.as.list.at = (uint32_t)p->w->term_count;
       value.as.list.count = 0;
-      st = bs_p_advance(p);
+      st = bs_p_advance_after_operand(p);
       if (st != BS_OK) {
         return st;
       }
@@ -9443,7 +9585,10 @@ static bs_status bs_p_term(bs_parser *p, bs_term *out) {
       uint32_t at;
       size_t i;
 
-      st = bs_p_expect(p, f->close);
+      if (!bs_p_is_punct(p, f->close)) {
+        return BS_ERR_MALFORMED;
+      }
+      st = bs_p_advance_after_operand(p);
       if (st != BS_OK) {
         return st;
       }
@@ -9850,7 +9995,7 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         return st;
       }
       if (is_extern && bs_p_is_punct(p, (uint8_t)BS_P_RPAREN)) {
-        st = bs_p_advance(p);
+        st = bs_p_advance_after_operand(p);
         if (st != BS_OK) {
           return st;
         }
@@ -9861,7 +10006,10 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
         continue;
       }
       if (nullary) {
-        st = bs_p_expect(p, (uint8_t)BS_P_RPAREN);
+        if (!bs_p_is_punct(p, (uint8_t)BS_P_RPAREN)) {
+          return BS_ERR_MALFORMED;
+        }
+        st = bs_p_advance_after_operand(p);
         if (st != BS_OK) {
           return st;
         }
@@ -9934,7 +10082,7 @@ static bs_status bs_p_expression(bs_parser *p, bs_op *out, size_t cap,
           }
         }
       }
-      st = bs_p_advance(p);
+      st = bs_p_advance_after_operand(p);
       if (st != BS_OK) {
         return st;
       }
@@ -10094,13 +10242,18 @@ static bs_status bs_p_scope(bs_parser *p, bs_origin *add) {
     return bs_p_advance(p);
   }
   if (BS_WORD(p, "previous")) {
-    /* Every block up to and including the one that said this. The authorizer
-     * has no position in the chain, so for it the annotation means every
-     * block there is. */
-    size_t last =
-        (p->block >= (size_t)BS_MAX_BLOCKS) ? p->w->block_count : p->block + 1U;
-    for (i = 0; i < last && i < (size_t)BS_MAX_BLOCKS; i++) {
-      *add |= BS_ORIGIN_ONE(i);
+    /* Every block up to and including the one that said this.
+     *
+     * In the authorizer it names nothing at all. The specification is explicit
+     * -- "`previous` is only available in blocks, and is ignored when used in
+     * the authorizer" -- and reading it as "every block there is" instead, on
+     * the reasoning that the authorizer sits at the end of the chain, inverts
+     * the annotation: one that should narrow the trusted set to nothing would
+     * widen it to include every block an attacker appended. */
+    if (p->block < (size_t)BS_MAX_BLOCKS) {
+      for (i = 0; i <= p->block && i < (size_t)BS_MAX_BLOCKS; i++) {
+        *add |= BS_ORIGIN_ONE(i);
+      }
     }
     return bs_p_advance(p);
   }
@@ -10506,6 +10659,24 @@ BS_API bs_status bs_world_parse(bs_world *w, bs_symtab *syms, bs_arena *a,
     return st;
   }
 
+  /* A block may open with a trust annotation that applies to everything in
+   * it: `<block> ::= (<origin_clause> ";" <sp>?)? ...`. A statement of its own
+   * still overrides it. The authorizer has no such clause -- it is not a
+   * block -- so one there is a syntax error rather than a wider default. */
+  if (BS_WORD(&p, "trusting")) {
+    if (block >= (size_t)BS_MAX_BLOCKS) {
+      return BS_ERR_MALFORMED;
+    }
+    st = bs_p_trusting(&p, &p.default_trust);
+    if (st != BS_OK) {
+      return st;
+    }
+    st = bs_p_expect(&p, (uint8_t)BS_P_SEMI);
+    if (st != BS_OK) {
+      return st;
+    }
+  }
+
   while (p.tok.kind != (uint8_t)BS_TK_EOF) {
     st = bs_p_statement(&p);
     if (st != BS_OK) {
@@ -10558,7 +10729,10 @@ static bs_status bs_query_any(bs_world *w, bs_symtab *syms, bs_arena *a,
     int found = 0;
     int keep = 0;
 
-    bs_solver_next(w, r, sv, &found);
+    st = bs_solver_next(w, r, sv, &found);
+    if (st != BS_OK) {
+      return st;
+    }
     if (!found) {
       return BS_OK;
     }
@@ -10593,7 +10767,10 @@ static bs_status bs_query_all(bs_world *w, bs_symtab *syms, bs_arena *a,
     int found = 0;
     int keep = 0;
 
-    bs_solver_next(w, r, sv, &found);
+    st = bs_solver_next(w, r, sv, &found);
+    if (st != BS_OK) {
+      return st;
+    }
     if (!found) {
       *yes = any;
       return BS_OK;

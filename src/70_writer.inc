@@ -59,8 +59,15 @@ static void bs_put_byte(bs_writer *w, uint8_t b) {
  * strlen, which puts a str* function into the shipped object and breaks
  * invariant 5. tools/check_invariants.py caught exactly that. sizeof cannot
  * be rewritten into anything. */
+/* Append a string literal, whose length the compiler already knows.
+ *
+ * The `"" lit` is a guard, not decoration. For a literal it concatenates to
+ * the same literal and costs nothing; for anything else -- a `const char *`,
+ * a ternary between two literals -- it is a syntax error. Without it `sizeof`
+ * silently measures a pointer, and the writer emits seven or eight bytes of
+ * whatever happened to be there. That has gone wrong twice. */
 #define BS_PUT_LIT(w, lit)                                                     \
-  bs_put_span((w), bs_span_make((lit), sizeof(lit) - 1U))
+  bs_put_span((w), bs_span_make("" lit, sizeof("" lit) - 1U))
 
 /* Signed decimal, INT64_MIN included.
  *
